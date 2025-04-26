@@ -1,0 +1,13 @@
+{
+  "name": "orcamento-pessoal-bot",
+  "version": "1.0.0",
+  "description": "Bot de orçamento pessoal no WhatsApp",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "axios": "^1.6.7"
+  }
+}
