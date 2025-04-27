@@ -1,8 +1,14 @@
 const express = require('express');
 const bodyParser = require('body-parser');
+const axios = require('axios');
 
 const app = express();
 app.use(bodyParser.json());
+
+// Informações do seu bot
+const GUPSHUP_API_URL = 'https://api.gupshup.io/sm/api/v1/msg';
+const API_KEY = 'sk_7b388ebe42994a0585db4a36584741cd';
+const BOT_PHONE_NUMBER = '5521975061666';
 
 // Rota para teste
 app.get('/', (req, res) => {
@@ -10,13 +16,42 @@ app.get('/', (req, res) => {
 });
 
 // Rota para receber mensagens do Gupshup
-app.post('/webhook', (req, res) => {
+app.post('/webhook', async (req, res) => {
     const incomingMessage = req.body;
-
     console.log('Mensagem recebida:', incomingMessage);
 
-    // Aqui você pode responder ou processar a mensagem recebida
-    res.sendStatus(200); // Responde para o Gupshup que recebeu
+    if (incomingMessage.type === 'message' && incomingMessage.payload?.payload?.text) {
+        const userPhone = incomingMessage.payload?.sender?.phone;
+        const userName = incomingMessage.payload?.sender?.name;
+        const userMessage = incomingMessage.payload?.payload?.text;
+
+        // Mensagem que você quer enviar de volta
+        const replyMessage = `Olá ${userName}! Você disse: "${userMessage}". Como posso te ajudar hoje?`;
+
+        try {
+            await axios.post(GUPSHUP_API_URL, {
+                channel: 'whatsapp',
+                source: BOT_PHONE_NUMBER,
+                destination: userPhone,
+                message: {
+                    type: 'text',
+                    text: replyMessage
+                },
+                src.name: 'OrcamentoPessoalBot'
+            }, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'apikey': API_KEY
+                }
+            });
+
+            console.log('Mensagem enviada com sucesso!');
+        } catch (error) {
+            console.error('Erro ao enviar mensagem:', error.response?.data || error.message);
+        }
+    }
+
+    res.sendStatus(200);
 });
 
 // Ouvindo na porta que o Render indicar
