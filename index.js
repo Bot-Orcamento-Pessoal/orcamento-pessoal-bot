@@ -5,10 +5,12 @@ const axios = require('axios');
 const app = express();
 app.use(bodyParser.json());
 
-// Sua API Key da Gupshup
+// Informações do seu bot
+const GUPSHUP_API_URL = 'https://api.gupshup.io/sm/api/v1/msg';
 const API_KEY = 'sk_7b388ebe42994a0585db4a36584741cd';
+const BOT_PHONE_NUMBER = '5521975061666';
 
-// Rota de teste
+// Rota para teste
 app.get('/', (req, res) => {
     res.send('Bot Orcamento Pessoal está rodando!');
 });
@@ -18,33 +20,41 @@ app.post('/webhook', async (req, res) => {
     const incomingMessage = req.body;
     console.log('Mensagem recebida:', incomingMessage);
 
-    // Captura o número de quem enviou
-    const senderPhoneNumber = incomingMessage.sender.phone;
+    if (incomingMessage.type === 'message' && incomingMessage.payload?.payload?.text) {
+        const userPhone = incomingMessage.payload?.sender?.phone;
+        const userName = incomingMessage.payload?.sender?.name;
+        const userMessage = incomingMessage.payload?.payload?.text;
 
-    // Enviar resposta automática
-    try {
-        await axios.post('https://api.gupshup.io/sm/api/v1/msg', null, {
-            params: {
+        // Mensagem que você quer enviar de volta
+        const replyMessage = `Olá ${userName}! Você disse: "${userMessage}". Como posso te ajudar hoje?`;
+
+        try {
+            await axios.post(GUPSHUP_API_URL, {
                 channel: 'whatsapp',
                 source: '917834811114',
-                destination: senderPhoneNumber,
-                message: JSON.stringify({ type: "text", text: "Olá! Recebi sua mensagem. Como posso te ajudar?" }),
-                src.name: 'OrcamentoPessoalBot'
-            },
-            headers: {
-                'apikey': API_KEY,
-                'Content-Type': 'application/x-www-form-urlencoded'
-            }
-        });
-        console.log('Mensagem de resposta enviada!');
-    } catch (error) {
-        console.error('Erro ao enviar resposta:', error.response?.data || error.message);
+                destination: userPhone,
+                message: {
+                    type: 'text',
+                    text: replyMessage
+                },
+                src_name: 'OrcamentoPessoalBot' // Alterado de "src.name"
+            }, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'apikey': API_KEY
+                }
+            });
+
+            console.log('Mensagem enviada com sucesso!');
+        } catch (error) {
+            console.error('Erro ao enviar mensagem:', error.response?.data || error.message);
+        }
     }
 
     res.sendStatus(200);
 });
 
-// Ouvindo na porta do Render
+// Ouvindo na porta que o Render indicar
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Servidor rodando na porta ${PORT}`);
