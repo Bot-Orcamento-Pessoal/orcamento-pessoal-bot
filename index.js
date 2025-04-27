@@ -31,7 +31,7 @@ app.post('/webhook', async (req, res) => {
         try {
             await axios.post(GUPSHUP_API_URL, {
                 channel: 'whatsapp',
-                source: BOT_PHONE_NUMBER,
+                source: 917834811114,
                 destination: userPhone,
                 message: {
                     type: 'text',
