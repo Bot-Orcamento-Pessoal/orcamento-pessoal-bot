@@ -5,17 +5,14 @@ const axios = require('axios');
 const app = express();
 app.use(bodyParser.json());
 
-// Informações do seu bot
 const GUPSHUP_API_URL = 'https://api.gupshup.io/sm/api/v1/msg';
 const API_KEY = 'sk_7b388ebe42994a0585db4a36584741cd';
-const BOT_PHONE_NUMBER = '5521975061666';
+const BOT_PHONE_NUMBER = '917834811114';
 
-// Rota para teste
 app.get('/', (req, res) => {
     res.send('Bot Orcamento Pessoal está rodando!');
 });
 
-// Rota para receber mensagens do Gupshup
 app.post('/webhook', async (req, res) => {
     const incomingMessage = req.body;
     console.log('Mensagem recebida:', incomingMessage);
@@ -25,19 +22,18 @@ app.post('/webhook', async (req, res) => {
         const userName = incomingMessage.payload?.sender?.name;
         const userMessage = incomingMessage.payload?.payload?.text;
 
-        // Mensagem que você quer enviar de volta
         const replyMessage = `Olá ${userName}! Você disse: "${userMessage}". Como posso te ajudar hoje?`;
 
         try {
             await axios.post(GUPSHUP_API_URL, {
                 channel: 'whatsapp',
-                source: '917834811114',
+                source: BOT_PHONE_NUMBER,
                 destination: userPhone,
                 message: {
                     type: 'text',
                     text: replyMessage
                 },
-                src_name: 'OrcamentoPessoalBot' // Alterado de "src.name"
+                src_name: 'OrcamentoPessoalBot'
             }, {
                 headers: {
                     'Content-Type': 'application/json',
@@ -54,7 +50,6 @@ app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
 });
 
-// Ouvindo na porta que o Render indicar
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Servidor rodando na porta ${PORT}`);
