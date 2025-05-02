@@ -7,7 +7,7 @@ app.use(bodyParser.json());
 
 // Informações do seu bot
 const GUPSHUP_API_URL = 'https://api.gupshup.io/sm/api/v1/msg';
-const API_KEY = 'sk_7b388ebe42994a0585db4a36584741cd'; // Sua API Key
+const API_KEY = 'sk_fe13e18636a04a0cbf9180e66e4fa5b6'; // Sua API Key
 const BOT_PHONE_NUMBER = '917834811114'; // Número do BOT no Gupshup (sem +)
 
 // Rota para teste
