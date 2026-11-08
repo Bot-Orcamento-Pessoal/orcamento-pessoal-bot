@@ -14,12 +14,10 @@ WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL", "") + "/" + TOKEN
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def get_saldo():
-    r = supabase.table("saldo_config").select("valor").eq("id", 1).execute()
-    return float(r.data[0]["valor"]) if r.data else 0.0
-
-def set_saldo(v):
-    supabase.table("saldo_config").update({"valor": v}).eq("id", 1).execute()
+    if espera == "saldo":
+        m = re.search(r"(\d+[.,]?\d*)", texto_original)
+        val = m.group(1) if m else ""
+        val = val.replace(",", ".")
 
 async def resumo(update, context):
     gastos = supabase.table("gastos").select("*").execute().data or []
