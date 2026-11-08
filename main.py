@@ -1,231 +1,198 @@
-import os
-import re
-import csv
-import io
+import os, re, csv, io
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 from supabase import create_client
-
 TOKEN = os.environ["BOT_TOKEN"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 PORT = int(os.environ.get("PORT", 10000))
 WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL", "") + "/" + TOKEN
-
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-    if espera == "saldo":
-        m = re.search(r"(\d+[.,]?\d*)", texto_original)
-        val = m.group(1) if m else ""
-        val = val.replace(",", ".")
+def get_saldo():
+    r = supabase.table("saldo_config").select("valor").eq("id", 1).execute()
+    if not r.data:
+        supabase.table("saldo_config").insert({"id": 1, "valor": 0}).execute()
+        return 0.0
+    return float(r.data[0]["valor"])
+
+def set_saldo(v):
+    supabase.table("saldo_config").upsert({"id": 1, "valor": v}).execute()
 
 async def resumo(update, context):
-    gastos = supabase.table("gastos").select("*").execute().data or []
-    despesas = supabase.table("despesas").select("*").execute().data or []
-    saldo = get_saldo()
-    dinheiro = sum(float(g["valor"]) for g in gastos if g["tipo"] == "dinheiro")
-    cartao = sum(float(g["valor"]) for g in gastos if g["tipo"] == "cartao")
-    sodexo = sum(float(g["valor"]) for g in gastos if g["tipo"] == "sodexo")
-    pagas = sum(float(d["valor"]) for d in despesas if d["status"] == "pago")
-    texto = f"📊 *Resumo financeiro*\n\n💰 Saldo: R$ {saldo:.2f}\n\nGastos dinheiro/débito: R$ {dinheiro:.2f}\nGastos no cartão: R$ {cartao:.2f}\nGastos SODEXO: R$ {sodexo:.2f}\nDespesas pagas: R$ {pagas:.2f}"
+    g = supabase.table("gastos").select("*").execute().data or []
+    d = supabase.table("despesas").select("*").execute().data or []
+    s = get_saldo()
+    din = sum(float(x["valor"]) for x in g if x["tipo"] == "dinheiro")
+    car = sum(float(x["valor"]) for x in g if x["tipo"] == "cartao")
+    sod = sum(float(x["valor"]) for x in g if x["tipo"] == "sodexo")
+    pag = sum(float(x["valor"]) for x in d if x["status"] == "pago")
+    t = f"📊 *Resumo*\n\n💰 Saldo: R$ {s:.2f}\nDinheiro: R$ {din:.2f}\nCartão: R$ {car:.2f}\nSODEXO: R$ {sod:.2f}\nPagas: R$ {pag:.2f}"
     if update.callback_query:
-        await update.callback_query.message.reply_text(texto, parse_mode="Markdown")
+        await update.callback_query.message.reply_text(t, parse_mode="Markdown")
     else:
-        await update.message.reply_text(texto, parse_mode="Markdown")
+        await update.message.reply_text(t, parse_mode="Markdown")
 
 def menu():
-    kb = [
-        [InlineKeyboardButton("💰 Incluir saldo", callback_data="saldo"),
-         InlineKeyboardButton("💸 Gasto dinheiro/débito", callback_data="gasto_dinheiro")],
-        [InlineKeyboardButton("💳 Gasto cartão", callback_data="gasto_cartao"),
-         InlineKeyboardButton("🍽️ Gasto SODEXO", callback_data="gasto_sodexo")],
-        [InlineKeyboardButton("📋 Listar gastos", callback_data="listar_gastos"),
-         InlineKeyboardButton("🧾 Listar despesas", callback_data="listar_despesas")],
-        [InlineKeyboardButton("✅ Pagar despesa", callback_data="pagar_despesa")],
-    ]
+    kb = [[InlineKeyboardButton("💰 Saldo", callback_data="saldo"), InlineKeyboardButton("💸 Dinheiro", callback_data="gasto_dinheiro")], [InlineKeyboardButton("💳 Cartão", callback_data="gasto_cartao"), InlineKeyboardButton("🍽️ SODEXO", callback_data="gasto_sodexo")], [InlineKeyboardButton("📋 Gastos", callback_data="listar_gastos"), InlineKeyboardButton("🧾 Despesas", callback_data="listar_despesas")], [InlineKeyboardButton("✅ Pagar", callback_data="pagar_despesa")]]
     return InlineKeyboardMarkup(kb)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update, context):
     context.user_data.clear()
-    await update.message.reply_text("Bot de orçamento\nBem-vindo ao seu bot de controle financeiro!", reply_markup=menu())
+    await update.message.reply_text("Bot de orçamento\nBem-vindo!", reply_markup=menu())
 
-async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def on_button(update, context):
     q = update.callback_query
     await q.answer()
     if q.data == "saldo":
         context.user_data["esperando"] = "saldo"
-        await q.message.reply_text("Envie o valor do saldo. Ex: 3500 ou Salario, 3500")
+        await q.message.reply_text("Envie o saldo. Ex: 3500")
     elif q.data.startswith("gasto_"):
-        tipo = q.data.replace("gasto_", "")
-        context.user_data["esperando"] = f"gasto_{tipo}"
-        await q.message.reply_text("Envie os gastos, um por linha. Ex:\nAlmoço, 35\nUber, 22")
+        context.user_data["esperando"] = q.data
+        await q.message.reply_text("Envie um por linha. Ex:\nAlmoço, 35")
     elif q.data == "listar_gastos":
-        gastos = supabase.table("gastos").select("*").order("id").execute().data or []
-        if not gastos:
-            await q.message.reply_text("Nenhum gasto ainda.")
-        else:
-            t = "Gastos:\n"
-            for i, g in enumerate(gastos, 1):
-                t += f"{i}. {g['descricao']} - R$ {float(g['valor']):.2f} - {g['tipo']} - {g['data']}\n"
-            await q.message.reply_text(t)
+        g = supabase.table("gastos").select("*").order("id").execute().data or []
+        t = "Nenhum gasto." if not g else "\n".join([f"{i+1}. {x['descricao']} - R$ {float(x['valor']):.2f} - {x['tipo']}" for i, x in enumerate(g)])
+        await q.message.reply_text(t)
     elif q.data == "listar_despesas":
-        ds = supabase.table("despesas").select("*").order("id").execute().data or []
-        if not ds:
-            await q.message.reply_text("Nenhuma despesa cadastrada.")
-        else:
-            t = "Despesas fixas:\n"
-            for d in ds:
-                t += f"{d['id']}. {d['descricao']} - R$ {float(d['valor']):.2f} - {d['status']}\n"
-            await q.message.reply_text(t)
+        d = supabase.table("despesas").select("*").order("id").execute().data or []
+        t = "Nenhuma despesa." if not d else "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f} - {x['status']}" for x in d])
+        await q.message.reply_text(t)
     elif q.data == "pagar_despesa":
-        ds = supabase.table("despesas").select("*").eq("status", "pendente").execute().data or []
-        if not ds:
-            await q.message.reply_text("Nenhuma despesa pendente.")
+        d = supabase.table("despesas").select("*").eq("status", "pendente").execute().data or []
+        if not d:
+            await q.message.reply_text("Nenhuma pendente.")
         else:
-            t = "Pendentes - envie o ID pra pagar. Ex: 1\n"
-            for d in ds:
-                t += f"{d['id']}. {d['descricao']} - R$ {float(d['valor']):.2f}\n"
+            t = "Pendentes - envie o ID:\n" + "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f}" for x in d])
             context.user_data["esperando"] = "pagar"
             await q.message.reply_text(t)
     await resumo(update, context)
 
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto_original = update.message.text.strip()
-    texto = texto_original.lower()
-    espera = context.user_data.get("esperando")
-
-    if espera == "saldo":
-        val = texto_original.split(",")[-1].strip().replace("R$", "").replace(",", ".")
+async def on_text(update, context):
+    o = update.message.text.strip()
+    tx = o.lower()
+    esp = context.user_data.get("esperando")
+    if esp == "saldo":
+        m2 = re.search(r"(\d+[.,]?\d*)", o)
         try:
-            v = float(val)
+            v = float(m2.group(1).replace(",", "."))
             set_saldo(get_saldo() + v)
             context.user_data.clear()
-            await update.message.reply_text(f"Saldo adicionado: R$ {v:.2f}")
+            await update.message.reply_text(f"Saldo: R$ {v:.2f}")
             await resumo(update, context)
         except:
-            await update.message.reply_text("Formato inválido. Envie só o número, ex: 3500")
+            await update.message.reply_text("Envie só o número, ex: 3500")
         return
-
-    if espera and espera.startswith("gasto_"):
-        tipo = espera.replace("gasto_", "")
-        total = 0
-        for linha in texto_original.split("\n"):
+    if esp and esp.startswith("gasto_"):
+        tipo = esp.replace("gasto_", "")
+        tot = 0
+        for linha in o.split("\n"):
             if "," not in linha:
                 continue
             desc, val = linha.rsplit(",", 1)
             try:
-                v = float(val.strip().replace("R$", "").replace(",", "."))
+                v = float(val.replace("R$", "").replace(",", "."))
             except:
                 continue
             supabase.table("gastos").insert({"descricao": desc.strip(), "valor": v, "tipo": tipo}).execute()
-            total += v
+            tot += v
             if tipo == "dinheiro":
                 set_saldo(get_saldo() - v)
         context.user_data.clear()
-        await update.message.reply_text(f"Registrado: R$ {total:.2f} em {tipo}")
+        await update.message.reply_text(f"Registrado: R$ {tot:.2f}")
         await resumo(update, context)
         return
-
-    if espera == "pagar":
+    if esp == "pagar":
         try:
-            id_d = int(texto_original.strip())
-            d = supabase.table("despesas").select("*").eq("id", id_d).execute().data[0]
-            supabase.table("despesas").update({"status": "pago"}).eq("id", id_d).execute()
+            i = int(o)
+            d = supabase.table("despesas").select("*").eq("id", i).execute().data[0]
+            supabase.table("despesas").update({"status": "pago"}).eq("id", i).execute()
             set_saldo(get_saldo() - float(d["valor"]))
             context.user_data.clear()
-            await update.message.reply_text(f"Despesa '{d['descricao']}' paga!")
+            await update.message.reply_text(f"Paga: {d['descricao']}")
             await resumo(update, context)
         except:
             await update.message.reply_text("ID inválido.")
         return
-
     tipo = "dinheiro"
-    if "cartao" in texto or "cartão" in texto or "credito" in texto or "crédito" in texto:
+    if "cartao" in tx or "cartão" in tx or "credito" in tx:
         tipo = "cartao"
-    elif "sodexo" in texto or "vale" in texto:
+    elif "sodexo" in tx or "vale" in tx:
         tipo = "sodexo"
-    elif "pix" in texto or "dinheiro" in texto or "debito" in texto or "débito" in texto:
-        tipo = "dinheiro"
-
-    limpo = texto_original
+    limpo = o
     for p in ["cartao", "cartão", "credito", "crédito", "sodexo", "vale", "pix", "dinheiro", "debito", "débito"]:
         limpo = re.sub(p, "", limpo, flags=re.IGNORECASE)
-
-    if texto.startswith("despesa"):
-        m = re.search(r"(\d+[.,]?\d*)", limpo)
-        if not m:
+    def pega_num(s):
+        m = re.search(r"(\d+[.,]?\d*)", s)
+        return float(m.group(1).replace(",", ".")) if m else None
+    def pega_desc(s, rem):
+        d = re.sub(rem, "", s, flags=re.IGNORECASE)
+        d = re.sub(r"\d+[.,]?\d*", "", d).strip()
+        return d or "Item"
+    if tx.startswith("despesa"):
+        v = pega_num(limpo)
+        if v is None:
             await update.message.reply_text("Use: despesa aluguel 1500")
             return
-        v = float(m.group(1).replace(",", "."))
-        desc = re.sub(r"despesa", "", limpo, flags=re.IGNORECASE)
-        desc = re.sub(r"\d+[.,]?\d*", "", desc).strip() or "Despesa"
-        supabase.table("despesas").insert({"descricao": desc, "valor": v, "status": "pendente"}).execute()
-        await update.message.reply_text(f"✅ Despesa '{desc}' - R$ {v:.2f} adicionada como pendente.")
+        d = pega_desc(limpo, r"despesa")
+        supabase.table("despesas").insert({"descricao": d, "valor": v, "status": "pendente"}).execute()
+        await update.message.reply_text(f"✅ Despesa {d} - R$ {v:.2f}")
         return
-
-    if texto.startswith(("entrada", "recebi", "salario", "salário")):
-        m = re.search(r"(\d+[.,]?\d*)", limpo)
-        if not m:
-            await update.message.reply_text("Não entendi o valor. Ex: entrada salario 3000")
+    if tx.startswith(("entrada", "recebi", "salario", "salário")):
+        v = pega_num(limpo)
+        if v is None:
+            await update.message.reply_text("Ex: entrada salario 3000")
             return
-        v = float(m.group(1).replace(",", "."))
-        desc = re.sub(r"entrada|recebi|salario|salário", "", limpo, flags=re.IGNORECASE)
-        desc = re.sub(r"\d+[.,]?\d*", "", desc).strip() or "Entrada"
+        d = pega_desc(limpo, r"entrada|recebi|salario|salário")
         set_saldo(get_saldo() + v)
-        await update.message.reply_text(f"✅ Entrada: {desc} - R$ {v:.2f}")
+        await update.message.reply_text(f"✅ Entrada: {d} - R$ {v:.2f}")
         await resumo(update, context)
         return
-
-    if texto.startswith(("saida", "saída", "gasto", "gastei", "paguei")):
-        m = re.search(r"(\d+[.,]?\d*)", limpo)
-        if not m:
-            await update.message.reply_text("Não entendi o valor. Ex: saida mercado 50")
+    if tx.startswith(("saida", "saída", "gasto", "gastei", "paguei")):
+        v = pega_num(limpo)
+        if v is None:
+            await update.message.reply_text("Ex: saida mercado 50")
             return
-        v = float(m.group(1).replace(",", "."))
-        desc = re.sub(r"saida|saída|gasto|gastei|paguei", "", limpo, flags=re.IGNORECASE)
-        desc = re.sub(r"\d+[.,]?\d*", "", desc).strip() or "Gasto"
-        supabase.table("gastos").insert({"descricao": desc, "valor": v, "tipo": tipo}).execute()
+        d = pega_desc(limpo, r"saida|saída|gasto|gastei|paguei")
+        supabase.table("gastos").insert({"descricao": d, "valor": v, "tipo": tipo}).execute()
         if tipo == "dinheiro":
             set_saldo(get_saldo() - v)
-        await update.message.reply_text(f"✅ Saída: {desc} - R$ {v:.2f} ({tipo})")
+        await update.message.reply_text(f"✅ Saída: {d} - R$ {v:.2f} ({tipo})")
         await resumo(update, context)
         return
-
-    m = re.search(r"(\d+[.,]?\d*)", limpo)
-    if m:
-        v = float(m.group(1).replace(",", "."))
-        desc = re.sub(r"\d+[.,]?\d*", "", limpo).strip() or "Gasto"
-        supabase.table("gastos").insert({"descricao": desc, "valor": v, "tipo": tipo}).execute()
+    v = pega_num(limpo)
+    if v is not None:
+        d = pega_desc(limpo, r"")
+        supabase.table("gastos").insert({"descricao": d, "valor": v, "tipo": tipo}).execute()
         if tipo == "dinheiro":
             set_saldo(get_saldo() - v)
-        await update.message.reply_text(f"✅ Saída: {desc} - R$ {v:.2f} ({tipo})")
+        await update.message.reply_text(f"✅ Saída: {d} - R$ {v:.2f} ({tipo})")
         await resumo(update, context)
         return
+    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50")
 
-    await update.message.reply_text("Não entendi. Tenta:\nentrada salario 3000\nsaida mercado 50\nsaida uber 22 cartao\ndespesa aluguel 1500")
-
-async def despesa_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def despesa_cmd(update, context):
     try:
         arg = " ".join(context.args)
         desc, val = arg.rsplit(",", 1)
         v = float(val.strip().replace(",", "."))
         supabase.table("despesas").insert({"descricao": desc.strip(), "valor": v, "status": "pendente"}).execute()
-        await update.message.reply_text(f"Despesa '{desc.strip()}' adicionada como pendente.")
+        await update.message.reply_text(f"Despesa '{desc.strip()}' adicionada.")
     except:
         await update.message.reply_text("Use: /despesa aluguel, 1500")
 
-async def exportar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    gastos = supabase.table("gastos").select("*").execute().data or []
-    despesas = supabase.table("despesas").select("*").execute().data or []
+async def exportar_cmd(update, context):
+    g = supabase.table("gastos").select("*").execute().data or []
+    d = supabase.table("despesas").select("*").execute().data or []
     out = io.StringIO()
     w = csv.writer(out)
     w.writerow(["tipo", "descricao", "valor", "data/status"])
-    for g in gastos:
-        w.writerow(["gasto", g["descricao"], g["valor"], g["data"]])
-    for d in despesas:
-        w.writerow(["despesa", d["descricao"], d["valor"], d["status"]])
+    for x in g:
+        w.writerow(["gasto", x["descricao"], x["valor"], x["data"]])
+    for x in d:
+        w.writerow(["despesa", x["descricao"], x["valor"], x["status"]])
     out.seek(0)
-    await update.message.reply_document(document=out.getvalue().encode(), filename="backup.csv", caption=f"Saldo atual: R$ {get_saldo():.2f}")
+    await update.message.reply_document(document=out.getvalue().encode(), filename="backup.csv", caption=f"Saldo: R$ {get_saldo():.2f}")
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
