@@ -19,9 +19,10 @@ def get_saldo():
     return float(r.data[0]["valor"])
 def set_saldo(v):
     supabase.table("saldo_config").upsert({"id": 1, "valor": v}).execute()
+def mes_atual_str():
+    return datetime.date.today().strftime("%Y-%m")
 def mes_de(g):
-    d = str(g.get("data") or g.get("created_at") or "")
-    return d[:7]  # YYYY-MM
+    return str(g.get("data") or g.get("created_at") or "")[:7]
 def parse_mes(txt):
     txt = txt.lower()
     m = re.search(r"(\d{4})-(\d{1,2})", txt)
@@ -30,7 +31,6 @@ def parse_mes(txt):
     m = re.search(r"(\d{1,2})/(\d{4})", txt)
     if m:
         return f"{m.group(2)}-{int(m.group(1)):02d}"
-    m = re.search(r"(\d{1,2})", txt)
     for nome, num in MESES.items():
         if nome in txt:
             ano = str(datetime.date.today().year)
@@ -38,28 +38,27 @@ def parse_mes(txt):
             if y:
                 ano = y.group(0)
             return f"{ano}-{num}"
+    m = re.search(r"(\d{1,2})", txt)
     if m:
-        ano = str(datetime.date.today().year)
-        return f"{ano}-{int(m.group(1)):02d}"
+        return f"{datetime.date.today().year}-{int(m.group(1)):02d}"
     return None
 
 async def resumo(update, context, filtro_mes=None):
     g = supabase.table("gastos").select("*").execute().data or []
     d = supabase.table("despesas").select("*").execute().data or []
-    if filtro_mes:
-        g = [x for x in g if mes_de(x) == filtro_mes]
-        titulo = f"📊 *Resumo de {filtro_mes[5:7]}/{filtro_mes[:4]}*"
-    else:
-        titulo = "📊 *Resumo*"
+    # SE NÃO PASSAR MÊS, MOSTRA SÓ O MÊS ATUAL
+    if not filtro_mes:
+        filtro_mes = mes_atual_str()
+    g = [x for x in g if mes_de(x) == filtro_mes]
     s = get_saldo()
     din = sum(float(x["valor"]) for x in g if x["tipo"] == "dinheiro")
     car = sum(float(x["valor"]) for x in g if x["tipo"] == "cartao")
     sod = sum(float(x["valor"]) for x in g if x["tipo"] == "sodexo")
-    pag = sum(float(x["valor"]) for x in d if x["status"] == "pago") if not filtro_mes else 0
-    t = f"{titulo}\n\n💰 Saldo atual: R$ {s:.2f}\nDinheiro: R$ {din:.2f}\nCartão: R$ {car:.2f}\nSODEXO: R$ {sod:.2f}"
-    if not filtro_mes:
+    pag = sum(float(x["valor"]) for x in d if x["status"] == "pago")
+    t = f"📊 *Resumo de {filtro_mes[5:7]}/{filtro_mes[:4]}*\n\n💰 Saldo atual: R$ {s:.2f}\nDinheiro: R$ {din:.2f}\nCartão: R$ {car:.2f}\nSODEXO: R$ {sod:.2f}"
+    if filtro_mes == mes_atual_str():
         t += f"\nPagas: R$ {pag:.2f}"
-    if filtro_mes and not g:
+    if not g:
         t += "\n\nNenhum gasto nesse mês."
     if update.callback_query:
         await update.callback_query.message.reply_text(t, parse_mode="Markdown")
@@ -85,10 +84,15 @@ async def apagar_gasto_por_id(gid):
     return g
 
 async def zerar_mes():
-    # NÃO apaga gastos antigos, só limpa as despesas pagas pro mês novo
+    # ZERA TUDO DO MÊS ATUAL, MAS MANTÉM OS MESES ANTERIORES
+    g = supabase.table("gastos").select("*").execute().data or []
+    for x in g:
+        if mes_de(x) == mes_atual_str():
+            supabase.table("gastos").delete().eq("id", x["id"]).execute()
     d = supabase.table("despesas").select("*").eq("status", "pago").execute().data or []
     for x in d:
         supabase.table("despesas").update({"status": "pendente"}).eq("id", x["id"]).execute()
+    set_saldo(0)
 
 async def on_button(update, context):
     q = update.callback_query
@@ -101,7 +105,8 @@ async def on_button(update, context):
         await q.message.reply_text("Envie um por linha. Ex:\nAlmoço, 35")
     elif q.data == "listar_gastos":
         g = supabase.table("gastos").select("*").order("id").execute().data or []
-        t = "Nenhum gasto." if not g else "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f} - {x['tipo']} - {str(x.get('data',''))[:10]}" for x in g])
+        g = [x for x in g if mes_de(x) == mes_atual_str()]
+        t = "Nenhum gasto nesse mês." if not g else "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f} - {x['tipo']}" for x in g])
         await q.message.reply_text(t + "\n\nPra apagar um, manda: apagar 3")
     elif q.data == "listar_despesas":
         d = supabase.table("despesas").select("*").order("id").execute().data or []
@@ -124,7 +129,7 @@ async def on_button(update, context):
             await q.message.reply_text(f"🗑️ Apagado: {ap['descricao']} - R$ {float(ap['valor']):.2f} ({ap['tipo']})")
     elif q.data == "zerar_mes":
         context.user_data["esperando"] = "confirmar_zerar"
-        await q.message.reply_text("⚠️ Zerar o mês?\nVai só voltar as despesas pagas pra pendente. Seus gastos antigos ficam SALVOS e você ainda consegue ver o resumo de setembro, outubro, etc.\n\nManda SIM pra confirmar ou NÃO pra cancelar.")
+        await q.message.reply_text("⚠️ Zerar o mês?\nVai apagar TODOS os gastos de NOVEMBRO, zerar o saldo pra R$ 0.00 e voltar as despesas pra pendente.\nSetembro/outubro ficam salvos, você ainda vê com: resumo setembro\n\nManda SIM pra confirmar ou NÃO pra cancelar.")
         return
     await resumo(update, context)
 
@@ -136,7 +141,7 @@ async def on_text(update, context):
         context.user_data.clear()
         if tx == "sim":
             await zerar_mes()
-            await update.message.reply_text("🔄 Mês zerado! Despesas voltaram pra pendente. Histórico mantido.")
+            await update.message.reply_text("🔄 Mês zerado! Tudo do mês atual apagado, saldo zerado. Começando do zero.")
             await resumo(update, context)
         else:
             await update.message.reply_text("Cancelado, nada foi apagado.")
@@ -203,10 +208,7 @@ async def on_text(update, context):
         return
     if tx.startswith("resumo"):
         fm = parse_mes(o)
-        if fm:
-            await resumo(update, context, filtro_mes=fm)
-        else:
-            await resumo(update, context)
+        await resumo(update, context, filtro_mes=fm)
         return
     tipo = "dinheiro"
     if "cartao" in tx or "cartão" in tx or "credito" in tx:
@@ -288,12 +290,22 @@ async def exportar_cmd(update, context):
     await update.message.reply_document(document=out.getvalue().encode(), filename="backup.csv", caption=f"Saldo: R$ {get_saldo():.2f}")
 async def zerar_mes_cmd(update, context):
     await zerar_mes()
-    await update.message.reply_text("🔄 Mês zerado! Despesas voltaram pra pendente. Histórico mantido.")
+    await update.message.reply_text("🔄 Mês zerado! Tudo do mês atual apagado, saldo zerado.")
     await resumo(update, context)
 async def resumo_cmd(update, context):
     txt = " ".join(context.args)
     fm = parse_mes(txt) if txt else None
     await resumo(update, context, filtro_mes=fm)
+async def apagar_tudo_cmd(update, context):
+    g = supabase.table("gastos").select("*").execute().data or []
+    for x in g:
+        supabase.table("gastos").delete().eq("id", x["id"]).execute()
+    d = supabase.table("despesas").select("*").execute().data or []
+    for x in d:
+        supabase.table("despesas").delete().eq("id", x["id"]).execute()
+    set_saldo(0)
+    await update.message.reply_text("🗑️ TUDO apagado! Gastos, despesas e saldo zerados. Começando do zero total.")
+    await resumo(update, context)
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
@@ -302,6 +314,7 @@ def main():
     app.add_handler(CommandHandler("exportar", exportar_cmd))
     app.add_handler(CommandHandler("zerar_mes", zerar_mes_cmd))
     app.add_handler(CommandHandler("resumo", resumo_cmd))
+    app.add_handler(CommandHandler("apagar_tudo", apagar_tudo_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=WEBHOOK_URL)
