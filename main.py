@@ -14,7 +14,6 @@ WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL", "") + "/" + TOKEN
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ---------- HELPERS ----------
 def get_saldo():
     r = supabase.table("saldo_config").select("valor").eq("id", 1).execute()
     return float(r.data[0]["valor"]) if r.data else 0.0
@@ -48,7 +47,6 @@ def menu():
     ]
     return InlineKeyboardMarkup(kb)
 
-# ---------- HANDLERS ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("Bot de orçamento\nBem-vindo ao seu bot de controle financeiro!", reply_markup=menu())
@@ -98,7 +96,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = texto_original.lower()
     espera = context.user_data.get("esperando")
 
-    # --- MODO BOTÃO ---
     if espera == "saldo":
         val = texto_original.split(",")[-1].strip().replace("R$", "").replace(",", ".")
         try:
@@ -144,7 +141,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("ID inválido.")
         return
 
-    # --- MODO FALAR DIRETO ---
     tipo = "dinheiro"
     if "cartao" in texto or "cartão" in texto or "credito" in texto or "crédito" in texto:
         tipo = "cartao"
@@ -157,7 +153,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for p in ["cartao", "cartão", "credito", "crédito", "sodexo", "vale", "pix", "dinheiro", "debito", "débito"]:
         limpo = re.sub(p, "", limpo, flags=re.IGNORECASE)
 
-    # DESPESA POR FALA: despesa aluguel 1500
     if texto.startswith("despesa"):
         m = re.search(r"(\d+[.,]?\d*)", limpo)
         if not m:
@@ -170,7 +165,58 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Despesa '{desc}' - R$ {v:.2f} adicionada como pendente.")
         return
 
-    # ENTRADA
     if texto.startswith(("entrada", "recebi", "salario", "salário")):
+        m = re.search(r"(\d+[.,]?\d*)", limpo)
+        if not m:
+            await update.message.reply_text("Não entendi o valor. Ex: entrada salario 3000")
+            return
+        v = float(m.group(1).replace(",", "."))
+        desc = re.sub(r"entrada|recebi|salario|salário", "", limpo, flags=re.IGNORECASE)
+        desc = re.sub(r"\d+[.,]?\d*", "", desc).strip() or "Entrada"
+        set_saldo(get_saldo() + v)
+        await update.message.reply_text(f"✅ Entrada: {desc} - R$ {v:.2f}")
+        await resumo(update, context)
+        return
 
-if texto.startswith(("saida", "saída", "gasto", "gastei", "paguei")):
+    if texto.startswith(("saida", "saída", "gasto", "gastei", "paguei")):
+        m = re.search(r"(\d+[.,]?\d*)", limpo)
+        if not m:
+            await update.message.reply_text("Não entendi o valor. Ex: saida mercado 50")
+            return
+        v = float(m.group(1).replace(",", "."))
+        desc = re.sub(r"saida|saída|gasto|gastei|paguei", "", limpo, flags=re.IGNORECASE)
+        desc = re.sub(r"\d+[.,]?\d*", "", desc).strip() or "Gasto"
+        supabase.table("gastos").insert({"descricao": desc, "valor": v, "tipo": tipo}).execute()
+        if tipo == "dinheiro":
+            set_saldo(get_saldo() - v)
+        await update.message.reply_text(f"✅ Saída: {desc} - R$ {v:.2f} ({tipo})")
+        await resumo(update, context)
+        return
+
+    m = re.search(r"(\d+[.,]?\d*)", limpo)
+    if m:
+        v = float(m.group(1).replace(",", "."))
+        desc = re.sub(r"\d+[.,]?\d*", "", limpo).strip() or "Gasto"
+        supabase.table("gastos").insert({"descricao": desc, "valor": v, "tipo": tipo}).execute()
+        if tipo == "dinheiro":
+            set_saldo(get_saldo() - v)
+        await update.message.reply_text(f"✅ Saída: {desc} - R$ {v:.2f} ({tipo})")
+        await resumo(update, context)
+        return
+
+    await update.message.reply_text("Não entendi. Tenta:\nentrada salario 3000\nsaida mercado 50\nsaida uber 22 cartao\ndespesa aluguel 1500")
+
+async def despesa_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        arg = " ".join(context.args)
+        desc, val = arg.rsplit(",", 1)
+        v = float(val.strip().replace(",", "."))
+        supabase.table("despesas").insert({"descricao": desc.strip(), "valor": v, "status": "pendente"}).execute()
+        await update.message.reply_text(f"Despesa '{desc.strip()}' adicionada como pendente.")
+    except:
+        await update.message.reply_text("Use: /despesa aluguel, 1500")
+
+async def exportar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    gastos = supabase.table("gastos").select("*").execute().data or []
+    despesas = supabase.table("despesas").select("*").execute().data or []
+    out = io.StringIO
