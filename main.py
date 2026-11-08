@@ -171,4 +171,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ENTRADA
-    if texto.startswith("entrada") or texto
+    if texto.startswith(("entrada", "recebi", "salario", "salário")):
+
+if texto.startswith(("saida", "saída", "gasto", "gastei", "paguei")):
