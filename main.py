@@ -42,6 +42,49 @@ def parse_mes(txt):
     if m:
         return f"{datetime.date.today().year}-{int(m.group(1)):02d}"
     return None
+def mes_anterior_str():
+    hoje = datetime.date.today()
+    ano = hoje.year
+    mes = hoje.month - 1
+    if mes == 0:
+        mes = 12
+        ano -= 1
+    return f"{ano}-{mes:02d}"
+# --- NOVO: CONTROLE DE VIRADA DO MÊS ---
+# Usa o id 3 do saldo_config pra guardar o último mês que você falou com o bot, ex: 202610
+def get_ultimo_mes_visto():
+    try:
+        r = supabase.table("saldo_config").select("valor").eq("id", 3).execute()
+        if not r.data:
+            return None
+        v = int(float(r.data[0]["valor"]))
+        s = str(v)  # 202610
+        return f"{s[:4]}-{s[5:7]}" if len(s) == 6 else None
+    except:
+        return None
+def set_ultimo_mes_visto():
+    try:
+        v = int(datetime.date.today().strftime("%Y%m"))
+        supabase.table("saldo_config").upsert({"id": 3, "valor": v}).execute()
+    except:
+        pass
+async def checar_virada(update):
+    # Retorna True se perguntou, pra não processar o resto ainda
+    atual = mes_atual_str()
+    ultimo = get_ultimo_mes_visto()
+    if ultimo is None:
+        set_ultimo_mes_visto()
+        return False
+    if ultimo == atual:
+        return False
+    # Virou o mês! Pergunta se quer zerar o mês anterior
+    # Já atualiza pra não perguntar toda hora
+    set_ultimo_mes_visto()
+    ant = ultimo
+    # Guarda o mês pra zerar quando responder SIM
+    # Vamos usar user_data via context? Aqui usamos esperando no on_text/start
+    # Por isso retornamos o mês anterior
+    return ant
 
 async def resumo(update, context, filtro_mes=None):
     g = supabase.table("gastos").select("*").execute().data or []
@@ -70,6 +113,12 @@ def menu():
 
 async def start(update, context):
     context.user_data.clear()
+    # CHECA VIRADA
+    ant = await checar_virada(update)
+    if ant:
+        context.user_data["esperando"] = f"confirmar_zerar:{ant}"
+        await update.message.reply_text(f"👋 Bem-vindo de volta!\n\n📅 Vi que virou o mês! Última vez que você falou comigo foi em {ant[5:7]}/{ant[:4]}.\n\nQuer zerar {ant[5:7]}/{ant[:4]} pra começar {mes_atual_str()[5:7]}/{mes_atual_str()[:4]} do zero?\nManda SIM pra zerar ou NÃO pra manter.")
+        return
     await update.message.reply_text("Bot de orçamento\nBem-vindo!", reply_markup=menu())
 
 async def apagar_gasto_por_id(gid):
@@ -85,12 +134,18 @@ async def apagar_gasto_por_id(gid):
 async def zerar_mes(filtro_mes=None):
     if not filtro_mes:
         filtro_mes = mes_atual_str()
-    # APAGA SÓ O MÊS QUE VOCÊ PEDIU
     g = supabase.table("gastos").select("*").execute().data or []
     for x in g:
         if mes_de(x) == filtro_mes:
             supabase.table("gastos").delete().eq("id", x["id"]).execute()
-    # Se for o mês atual, zera saldo e despesas também
+    if filtro_mes == mes_atual_str() or filtro_mes == mes_anterior_str():
+        # Se zerou o mês anterior na virada, também zera saldo e despesas
+        d = supabase.table("despesas").select("*").eq("status", "pago").execute().data or []
+        for x in d:
+            supabase.table("despesas").update({"status": "pendente"}).eq("id", x["id"]).execute()
+        # Só zera saldo se for virada / mês atual
+        if filtro_mes == mes_anterior_str():
+            set_saldo(0)
     if filtro_mes == mes_atual_str():
         d = supabase.table("despesas").select("*").eq("status", "pago").execute().data or []
         for x in d:
@@ -133,7 +188,7 @@ async def on_button(update, context):
             await q.message.reply_text(f"🗑️ Apagado: {ap['descricao']} - R$ {float(ap['valor']):.2f} ({ap['tipo']})")
     elif q.data == "zerar_mes":
         context.user_data["esperando"] = f"confirmar_zerar:{mes_atual_str()}"
-        await q.message.reply_text(f"⚠️ Zerar o mês {mes_atual_str()[5:7]}/{mes_atual_str()[:4]}?\nVai apagar TODOS os gastos desse mês e zerar o saldo.\n\nSe quiser zerar outro mês, não clica aqui. Manda direto: zerar setembro\n\nManda SIM pra confirmar ou NÃO pra cancelar.")
+        await q.message.reply_text(f"⚠️ Zerar o mês {mes_atual_str()[5:7]}/{mes_atual_str()[:4]}?\nVai apagar TODOS os gastos desse mês e zerar o saldo.\n\nSe quiser zerar outro mês, manda direto: zerar setembro\n\nManda SIM pra confirmar ou NÃO pra cancelar.")
         return
     await resumo(update, context)
 
@@ -141,16 +196,24 @@ async def on_text(update, context):
     o = update.message.text.strip()
     tx = o.lower()
     esp = context.user_data.get("esperando")
-    # CONFIRMAR ZERAR - agora com o mês dentro do esperando
+    # Se está esperando confirmação da virada, trata primeiro
     if esp and esp.startswith("confirmar_zerar"):
         filtro = esp.split(":")[1] if ":" in esp else mes_atual_str()
         context.user_data.clear()
         if tx == "sim":
             await zerar_mes(filtro)
-            await update.message.reply_text(f"🔄 Mês {filtro[5:7]}/{filtro[:4]} zerado! Começando do zero.")
-            await resumo(update, context, filtro_mes=filtro)
+            await update.message.reply_text(f"🔄 Mês {filtro[5:7]}/{filtro[:4]} zerado! Começando {mes_atual_str()[5:7]}/{mes_atual_str()[:4]} do zero.")
+            await update.message.reply_text("Agora pode mandar seu primeiro gasto do mês!", reply_markup=menu())
         else:
-            await update.message.reply_text("Cancelado, nada foi apagado.")
+            await update.message.reply_text("Beleza, mantive o mês anterior. Pode continuar normal.", reply_markup=menu())
+        return
+    # CHECA VIRADA também quando manda texto direto, sem /start
+    ant = await checar_virada(update)
+    if ant and not esp:
+        context.user_data["esperando"] = f"confirmar_zerar:{ant}"
+        await update.message.reply_text(f"📅 Vi que virou o mês! Última vez foi em {ant[5:7]}/{ant[:4]}.\nQuer zerar {ant[5:7]}/{ant[:4]} pra começar do zero?\nManda SIM ou NÃO.\n\nSeu gasto de agora vai ficar guardado, depois que responder eu processo ele.")
+        # Guarda o texto pra depois? Simples: pede pra mandar de novo
+        context.user_data["pendente"] = o
         return
     if esp == "saldo":
         m2 = re.search(r"(\d+[.,]?\d*)", o)
@@ -194,7 +257,6 @@ async def on_text(update, context):
         except:
             await update.message.reply_text("ID inválido.")
         return
-    # ZERAR COM MÊS ESPECÍFICO
     if tx.startswith("zerar"):
         fm = parse_mes(o) or mes_atual_str()
         context.user_data["esperando"] = f"confirmar_zerar:{fm}"
