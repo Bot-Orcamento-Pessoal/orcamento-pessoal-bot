@@ -220,3 +220,24 @@ async def exportar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     gastos = supabase.table("gastos").select("*").execute().data or []
     despesas = supabase.table("despesas").select("*").execute().data or []
     out = io.StringIO
+    w = csv.writer(out)
+    w.writerow(["tipo", "descricao", "valor", "data/status"])
+    for g in gastos:
+        w.writerow(["gasto", g["descricao"], g["valor"], g["data"]])
+    for d in despesas:
+        w.writerow(["despesa", d["descricao"], d["valor"], d["status"]])
+    out.seek(0)
+    await update.message.reply_document(document=out.getvalue().encode(), filename="backup.csv", caption=f"Saldo atual: R$ {get_saldo():.2f}")
+
+def main():
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("despesa", despesa_cmd))
+    app.add_handler(CommandHandler("exportar", exportar_cmd))
+    app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=WEBHOOK_URL)
+    print("Bot rodando (webhook)...")
+
+if __name__ == "__main__":
+    main()
