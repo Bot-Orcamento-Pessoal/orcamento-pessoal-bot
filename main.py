@@ -219,7 +219,7 @@ async def despesa_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def exportar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     gastos = supabase.table("gastos").select("*").execute().data or []
     despesas = supabase.table("despesas").select("*").execute().data or []
-    out = io.StringIO
+    out = io.StringIO()
     w = csv.writer(out)
     w.writerow(["tipo", "descricao", "valor", "data/status"])
     for g in gastos:
