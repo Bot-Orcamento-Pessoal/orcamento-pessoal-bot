@@ -1,7 +1,9 @@
 import os, re, csv, io, datetime
+from zoneinfo import ZoneInfo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters, TypeHandler, ApplicationHandlerStop
 from supabase import create_client
+
 TOKEN = os.environ["BOT_TOKEN"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
@@ -9,20 +11,70 @@ PORT = int(os.environ.get("PORT", 10000))
 WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL", "") + "/" + TOKEN
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+TZ = ZoneInfo("America/Sao_Paulo")
 MESES = {"janeiro":"01","fevereiro":"02","marco":"03","março":"03","abril":"04","maio":"05","junho":"06","julho":"07","agosto":"08","setembro":"09","outubro":"10","novembro":"11","dezembro":"12"}
 
+# ---------- SEGURANÇA: SÓ VOCÊ + SUA MULHER ----------
+ALLOWED_IDS = set()
+_raw = os.environ.get("ALLOWED_USER_IDS", "")
+for _x in _raw.replace(";", ",").split(","):
+    _x = _x.strip()
+    if _x.isdigit():
+        ALLOWED_IDS.add(int(_x))
+
+async def so_permitidos(update, context):
+    if not ALLOWED_IDS:
+        return
+    uid = update.effective_user.id if update.effective_user else None
+    if uid not in ALLOWED_IDS:
+        raise ApplicationHandlerStop
+
+def escape_md(s):
+    # Escapa _ * [ ] ( ) para não quebrar o Markdown
+    s = str(s)
+    for c in ["_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"]:
+        s = s.replace(c, "\\" + c)
+    return s
+
+def hoje_sp():
+    return datetime.datetime.now(TZ).date()
+
 def get_saldo():
-    r = supabase.table("saldo_config").select("valor").eq("id", 1).execute()
-    if not r.data:
-        supabase.table("saldo_config").insert({"id": 1, "valor": 0}).execute()
+    try:
+        r = supabase.table("saldo_config").select("valor").eq("id", 1).execute()
+        if not r.data:
+            supabase.table("saldo_config").insert({"id": 1, "valor": 0}).execute()
+            return 0.0
+        return float(r.data[0]["valor"])
+    except Exception as e:
+        print(f"Erro get_saldo: {e}")
         return 0.0
-    return float(r.data[0]["valor"])
+
 def set_saldo(v):
-    supabase.table("saldo_config").upsert({"id": 1, "valor": v}).execute()
+    try:
+        supabase.table("saldo_config").upsert({"id": 1, "valor": v}).execute()
+    except Exception as e:
+        print(f"Erro set_saldo: {e}")
+
 def mes_atual_str():
-    return datetime.date.today().strftime("%Y-%m")
+    return hoje_sp().strftime("%Y-%m")
+
 def mes_de(g):
-    return str(g.get("data") or g.get("created_at") or "")[:7]
+    # Converte created_at/data para fuso SP antes de pegar o mês
+    raw = g.get("data") or g.get("created_at") or ""
+    if not raw:
+        return ""
+    try:
+        # Ex: 2026-11-08T01:00:00+00:00
+        dt = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        dt = dt.astimezone(TZ)
+        return dt.strftime("%Y-%m")
+    except Exception as e:
+        print(f"Erro mes_de: {e}")
+        return str(raw)[:7]
+
 def parse_mes(txt):
     txt = txt.lower()
     m = re.search(r"(\d{4})-(\d{1,2})", txt)
@@ -33,23 +85,25 @@ def parse_mes(txt):
         return f"{m.group(2)}-{int(m.group(1)):02d}"
     for nome, num in MESES.items():
         if nome in txt:
-            ano = str(datetime.date.today().year)
+            ano = str(hoje_sp().year)
             y = re.search(r"20\d{2}", txt)
             if y:
                 ano = y.group(0)
             return f"{ano}-{num}"
     m = re.search(r"(\d{1,2})", txt)
     if m:
-        return f"{datetime.date.today().year}-{int(m.group(1)):02d}"
+        return f"{hoje_sp().year}-{int(m.group(1)):02d}"
     return None
+
 def mes_anterior_str():
-    hoje = datetime.date.today()
-    ano = hoje.year
-    mes = hoje.month - 1
+    h = hoje_sp()
+    ano = h.year
+    mes = h.month - 1
     if mes == 0:
         mes = 12
         ano -= 1
     return f"{ano}-{mes:02d}"
+
 def get_ultimo_mes_visto():
     try:
         r = supabase.table("saldo_config").select("valor").eq("id", 3).execute()
@@ -57,15 +111,19 @@ def get_ultimo_mes_visto():
             return None
         v = int(float(r.data[0]["valor"]))
         s = str(v)
-        return f"{s[:4]}-{s[5:7]}" if len(s) == 6 else None
-    except:
+        # CORRIGIDO: era s[5:7], o certo é s[4:6]
+        return f"{s[:4]}-{s[4:6]}" if len(s) == 6 else None
+    except Exception as e:
+        print(f"Erro get_ultimo_mes_visto: {e}")
         return None
+
 def set_ultimo_mes_visto():
     try:
-        v = int(datetime.date.today().strftime("%Y%m"))
+        v = int(hoje_sp().strftime("%Y%m"))
         supabase.table("saldo_config").upsert({"id": 3, "valor": v}).execute()
-    except:
-        pass
+    except Exception as e:
+        print(f"Erro set_ultimo_mes_visto: {e}")
+
 async def checar_virada(update):
     atual = mes_atual_str()
     ultimo = get_ultimo_mes_visto()
@@ -76,6 +134,33 @@ async def checar_virada(update):
         return False
     set_ultimo_mes_visto()
     return ultimo
+
+def gerar_csv_bytes():
+    try:
+        g = supabase.table("gastos").select("*").execute().data or []
+        d = supabase.table("despesas").select("*").execute().data or []
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow(["tipo", "descricao", "valor", "data/status"])
+        for x in g:
+            w.writerow(["gasto", x["descricao"], x["valor"], x.get("data", "") or x.get("created_at", "")])
+        for x in d:
+            w.writerow(["despesa", x["descricao"], x["valor"], x["status"]])
+        out.seek(0)
+        return out.getvalue().encode()
+    except Exception as e:
+        print(f"Erro gerar_csv: {e}")
+        return b""
+
+async def enviar_backup(update, legenda="Backup automático antes de apagar"):
+    try:
+        data = gerar_csv_bytes()
+        if update.message:
+            await update.message.reply_document(document=data, filename="backup.csv", caption=legenda)
+        elif update.callback_query:
+            await update.callback_query.message.reply_document(document=data, filename="backup.csv", caption=legenda)
+    except Exception as e:
+        print(f"Erro enviar_backup: {e}")
 
 async def resumo(update, context, filtro_mes=None, detalhado=False):
     g = supabase.table("gastos").select("*").execute().data or []
@@ -102,7 +187,7 @@ async def resumo(update, context, filtro_mes=None, detalhado=False):
         ordenado = sorted(agrupado.items(), key=lambda item: item[1], reverse=True)
         t += "\n\n🧾 *Detalhes:*"
         for i, (nome, valor) in enumerate(ordenado, start=1):
-            t += f"\n{i}. {nome} - R$ {valor:.2f}"
+            t += f"\n{i}. {escape_md(nome)} - R$ {valor:.2f}"
     if update.callback_query:
         await update.callback_query.message.reply_text(t, parse_mode="Markdown")
     else:
@@ -122,27 +207,34 @@ async def start(update, context):
     await update.message.reply_text("Bot de orçamento\nBem-vindo!", reply_markup=menu())
 
 async def apagar_gasto_por_id(gid):
-    d = supabase.table("gastos").select("*").eq("id", gid).execute().data
-    if not d:
+    try:
+        d = supabase.table("gastos").select("*").eq("id", gid).execute().data
+        if not d:
+            return None
+        g = d[0]
+        supabase.table("gastos").delete().eq("id", gid).execute()
+        if g["tipo"] == "dinheiro":
+            set_saldo(get_saldo() + float(g["valor"]))
+        return g
+    except Exception as e:
+        print(f"Erro apagar_gasto: {e}")
         return None
-    g = d[0]
-    supabase.table("gastos").delete().eq("id", gid).execute()
-    if g["tipo"] == "dinheiro":
-        set_saldo(get_saldo() + float(g["valor"]))
-    return g
 
 async def zerar_mes(filtro_mes=None):
     if not filtro_mes:
         filtro_mes = mes_atual_str()
-    g = supabase.table("gastos").select("*").execute().data or []
-    for x in g:
-        if mes_de(x) == filtro_mes:
-            supabase.table("gastos").delete().eq("id", x["id"]).execute()
-    if filtro_mes == mes_atual_str() or filtro_mes == mes_anterior_str():
-        d = supabase.table("despesas").select("*").eq("status", "pago").execute().data or []
-        for x in d:
-            supabase.table("despesas").update({"status": "pendente"}).eq("id", x["id"]).execute()
-        set_saldo(0)
+    try:
+        g = supabase.table("gastos").select("*").execute().data or []
+        for x in g:
+            if mes_de(x) == filtro_mes:
+                supabase.table("gastos").delete().eq("id", x["id"]).execute()
+        if filtro_mes == mes_atual_str() or filtro_mes == mes_anterior_str():
+            d = supabase.table("despesas").select("*").eq("status", "pago").execute().data or []
+            for x in d:
+                supabase.table("despesas").update({"status": "pendente"}).eq("id", x["id"]).execute()
+            set_saldo(0)
+    except Exception as e:
+        print(f"Erro zerar_mes: {e}")
     return filtro_mes
 
 async def on_button(update, context):
@@ -164,18 +256,18 @@ async def on_button(update, context):
     elif q.data == "listar_gastos":
         g = supabase.table("gastos").select("*").order("id").execute().data or []
         g = [x for x in g if mes_de(x) == mes_atual_str()]
-        t = "Nenhum gasto nesse mês." if not g else "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f} - {x['tipo']}" for x in g])
+        t = "Nenhum gasto nesse mês." if not g else "\n".join([f"{x['id']}. {escape_md(x['descricao'])} - R$ {float(x['valor']):.2f} - {x['tipo']}" for x in g])
         await q.message.reply_text(t + "\n\nPra apagar um, manda: apagar 3")
     elif q.data == "listar_despesas":
         d = supabase.table("despesas").select("*").order("id").execute().data or []
-        t = "Nenhuma despesa." if not d else "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f} - {x['status']}" for x in d])
+        t = "Nenhuma despesa." if not d else "\n".join([f"{x['id']}. {escape_md(x['descricao'])} - R$ {float(x['valor']):.2f} - {x['status']}" for x in d])
         await q.message.reply_text(t)
     elif q.data == "pagar_despesa":
         d = supabase.table("despesas").select("*").eq("status", "pendente").execute().data or []
         if not d:
             await q.message.reply_text("Nenhuma pendente.")
         else:
-            t = "Pendentes - envie o ID:\n" + "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f}" for x in d])
+            t = "Pendentes - envie o ID:\n" + "\n".join([f"{x['id']}. {escape_md(x['descricao'])} - R$ {float(x['valor']):.2f}" for x in d])
             context.user_data["esperando"] = "pagar"
             await q.message.reply_text(t)
     elif q.data == "apagar_ultimo":
@@ -184,7 +276,7 @@ async def on_button(update, context):
             await q.message.reply_text("Nenhum gasto pra apagar.")
         else:
             ap = await apagar_gasto_por_id(g[0]["id"])
-            await q.message.reply_text(f"🗑️ Apagado: {ap['descricao']} - R$ {float(ap['valor']):.2f} ({ap['tipo']})")
+            await q.message.reply_text(f"🗑️ Apagado: {escape_md(ap['descricao'])} - R$ {float(ap['valor']):.2f} ({ap['tipo']})")
     elif q.data == "zerar_mes":
         context.user_data["esperando"] = f"confirmar_zerar:{mes_atual_str()}"
         await q.message.reply_text(f"⚠️ Zerar o mês {mes_atual_str()[5:7]}/{mes_atual_str()[:4]}?\nVai apagar TODOS os gastos desse mês e zerar o saldo.\n\nSe quiser zerar outro mês, manda direto: zerar setembro\n\nManda SIM pra confirmar ou NÃO pra cancelar.")
@@ -197,13 +289,35 @@ async def on_text(update, context):
     esp = context.user_data.get("esperando")
     if esp and esp.startswith("confirmar_zerar"):
         filtro = esp.split(":")[1] if ":" in esp else mes_atual_str()
+        pendente = context.user_data.get("pendente")
         context.user_data.clear()
         if tx == "sim":
+            await enviar_backup(update, legenda=f"Backup antes de zerar {filtro}")
             await zerar_mes(filtro)
             await update.message.reply_text(f"🔄 Mês {filtro[5:7]}/{filtro[:4]} zerado! Começando {mes_atual_str()[5:7]}/{mes_atual_str()[:4]} do zero.")
             await update.message.reply_text("Agora pode mandar seu primeiro gasto do mês!", reply_markup=menu())
         else:
             await update.message.reply_text("Beleza, mantive o mês anterior. Pode continuar normal.", reply_markup=menu())
+        # CORRIGIDO: reprocessa o gasto que ficou guardado
+        if pendente:
+            update.message.text = pendente
+            await on_text(update, context)
+        return
+    if esp and esp.startswith("confirmar_apagar_tudo"):
+        context.user_data.clear()
+        if tx == "sim":
+            await enviar_backup(update, legenda="Backup antes de apagar tudo")
+            g = supabase.table("gastos").select("*").execute().data or []
+            for x in g:
+                supabase.table("gastos").delete().eq("id", x["id"]).execute()
+            d = supabase.table("despesas").select("*").execute().data or []
+            for x in d:
+                supabase.table("despesas").delete().eq("id", x["id"]).execute()
+            set_saldo(0)
+            await update.message.reply_text("🗑️ TUDO apagado! Backup enviado antes.")
+            await resumo(update, context)
+        else:
+            await update.message.reply_text("Ufa! Cancelei, não apaguei nada.", reply_markup=menu())
         return
     ant = await checar_virada(update)
     if ant and not esp:
@@ -219,7 +333,8 @@ async def on_text(update, context):
             context.user_data.clear()
             await update.message.reply_text(f"Saldo: R$ {v:.2f}")
             await resumo(update, context)
-        except:
+        except Exception as e:
+            print(f"Erro saldo: {e}")
             await update.message.reply_text("Envie só o número, ex: 3500")
         return
     if esp and esp.startswith("gasto_"):
@@ -231,7 +346,8 @@ async def on_text(update, context):
             desc, val = linha.rsplit(",", 1)
             try:
                 v = float(val.replace("R$", "").replace(",", "."))
-            except:
+            except Exception as e:
+                print(f"Erro gasto linha: {e}")
                 continue
             supabase.table("gastos").insert({"descricao": desc.strip(), "valor": v, "tipo": tipo}).execute()
             tot += v
@@ -248,10 +364,15 @@ async def on_text(update, context):
             supabase.table("despesas").update({"status": "pago"}).eq("id", i).execute()
             set_saldo(get_saldo() - float(d["valor"]))
             context.user_data.clear()
-            await update.message.reply_text(f"Paga: {d['descricao']}")
+            await update.message.reply_text(f"Paga: {escape_md(d['descricao'])}")
             await resumo(update, context)
-        except:
+        except Exception as e:
+            print(f"Erro pagar: {e}")
             await update.message.reply_text("ID inválido.")
+        return
+    if tx.startswith("apagar tudo") or tx == "apagar_tudo":
+        context.user_data["esperando"] = "confirmar_apagar_tudo"
+        await update.message.reply_text("⚠️ ATENÇÃO! Isso vai apagar TODOS os gastos, despesas e zerar o saldo.\nVou mandar um backup antes, mas confirma:\nManda SIM pra apagar tudo ou NÃO pra cancelar.")
         return
     if tx.startswith("zerar"):
         fm = parse_mes(o) or mes_atual_str()
@@ -266,14 +387,14 @@ async def on_text(update, context):
                 await update.message.reply_text("Nenhum gasto pra apagar.")
                 return
             ap = await apagar_gasto_por_id(g[0]["id"])
-            await update.message.reply_text(f"🗑️ Apagado: {ap['descricao']} - R$ {float(ap['valor']):.2f}")
+            await update.message.reply_text(f"🗑️ Apagado: {escape_md(ap['descricao'])} - R$ {float(ap['valor']):.2f}")
             await resumo(update, context)
             return
         ap = await apagar_gasto_por_id(int(m.group(1)))
         if not ap:
             await update.message.reply_text("ID não encontrado.")
             return
-        await update.message.reply_text(f"🗑️ Apagado: {ap['descricao']} - R$ {float(ap['valor']):.2f}")
+        await update.message.reply_text(f"🗑️ Apagado: {escape_md(ap['descricao'])} - R$ {float(ap['valor']):.2f}")
         await resumo(update, context)
         return
     if tx.startswith("resumo"):
@@ -282,12 +403,12 @@ async def on_text(update, context):
         await update.message.reply_text(f"Resumo de {fm[5:7]}/{fm[:4]} - quer como?", reply_markup=kb)
         return
     tipo = "dinheiro"
-    if "cartao" in tx or "cartão" in tx or "credito" in tx:
+    if re.search(r"\b(cartao|cartão|credito|crédito)\b", tx):
         tipo = "cartao"
-    elif "sodexo" in tx or "vale" in tx:
+    elif re.search(r"\b(sodexo|vale)\b", tx):
         tipo = "sodexo"
     limpo = o
-    for p in ["cartao", "cartão", "credito", "crédito", "sodexo", "vale", "pix", "dinheiro", "debito", "débito"]:
+    for p in [r"\bcartao\b", r"\bcartão\b", r"\bcredito\b", r"\bcrédito\b", r"\bsodexo\b", r"\bvale\b", r"\bpix\b", r"\bdinheiro\b", r"\bdebito\b", r"\bdébito\b"]:
         limpo = re.sub(p, "", limpo, flags=re.IGNORECASE)
     def pega_num(s):
         m = re.search(r"(\d+[.,]?\d*)", s)
@@ -303,7 +424,7 @@ async def on_text(update, context):
             return
         d = pega_desc(limpo, r"despesa")
         supabase.table("despesas").insert({"descricao": d, "valor": v, "status": "pendente"}).execute()
-        await update.message.reply_text(f"✅ Despesa {d} - R$ {v:.2f}")
+        await update.message.reply_text(f"✅ Despesa {escape_md(d)} - R$ {v:.2f}")
         return
     if tx.startswith(("entrada", "recebi", "salario", "salário")):
         v = pega_num(limpo)
@@ -312,7 +433,7 @@ async def on_text(update, context):
             return
         d = pega_desc(limpo, r"entrada|recebi|salario|salário")
         set_saldo(get_saldo() + v)
-        await update.message.reply_text(f"✅ Entrada: {d} - R$ {v:.2f}")
+        await update.message.reply_text(f"✅ Entrada: {escape_md(d)} - R$ {v:.2f}")
         await resumo(update, context)
         return
     if tx.startswith(("saida", "saída", "gasto", "gastei", "paguei")):
@@ -324,7 +445,7 @@ async def on_text(update, context):
         supabase.table("gastos").insert({"descricao": d, "valor": v, "tipo": tipo}).execute()
         if tipo == "dinheiro":
             set_saldo(get_saldo() - v)
-        await update.message.reply_text(f"✅ Saída: {d} - R$ {v:.2f} ({tipo})")
+        await update.message.reply_text(f"✅ Saída: {escape_md(d)} - R$ {v:.2f} ({tipo})")
         await resumo(update, context)
         return
     v = pega_num(limpo)
@@ -333,7 +454,7 @@ async def on_text(update, context):
         supabase.table("gastos").insert({"descricao": d, "valor": v, "tipo": tipo}).execute()
         if tipo == "dinheiro":
             set_saldo(get_saldo() - v)
-        await update.message.reply_text(f"✅ Saída: {d} - R$ {v:.2f} ({tipo})")
+        await update.message.reply_text(f"✅ Saída: {escape_md(d)} - R$ {v:.2f} ({tipo})")
         await resumo(update, context)
         return
     await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nzerar setembro\napagar ultimo")
@@ -344,45 +465,33 @@ async def despesa_cmd(update, context):
         desc, val = arg.rsplit(",", 1)
         v = float(val.strip().replace(",", "."))
         supabase.table("despesas").insert({"descricao": desc.strip(), "valor": v, "status": "pendente"}).execute()
-        await update.message.reply_text(f"Despesa '{desc.strip()}' adicionada.")
-    except:
+        await update.message.reply_text(f"Despesa '{escape_md(desc.strip())}' adicionada.")
+    except Exception as e:
+        print(f"Erro despesa_cmd: {e}")
         await update.message.reply_text("Use: /despesa aluguel, 1500")
 async def exportar_cmd(update, context):
-    g = supabase.table("gastos").select("*").execute().data or []
-    d = supabase.table("despesas").select("*").execute().data or []
-    out = io.StringIO()
-    w = csv.writer(out)
-    w.writerow(["tipo", "descricao", "valor", "data/status"])
-    for x in g:
-        w.writerow(["gasto", x["descricao"], x["valor"], x.get("data", "")])
-    for x in d:
-        w.writerow(["despesa", x["descricao"], x["valor"], x["status"]])
-    out.seek(0)
-    await update.message.reply_document(document=out.getvalue().encode(), filename="backup.csv", caption=f"Saldo: R$ {get_saldo():.2f}")
+    data = gerar_csv_bytes()
+    await update.message.reply_document(document=data, filename="backup.csv", caption=f"Saldo: R$ {get_saldo():.2f}")
 async def zerar_mes_cmd(update, context):
     txt = " ".join(context.args)
     fm = parse_mes(txt) if txt else mes_atual_str()
-    await zerar_mes(fm)
-    await update.message.reply_text(f"🔄 Mês {fm[5:7]}/{fm[:4]} zerado!")
-    await resumo(update, context, filtro_mes=fm)
+    # Pede confirmação via on_text, não zera direto
+    context.user_data["esperando"] = f"confirmar_zerar:{fm}"
+    await update.message.reply_text(f"⚠️ Zerar o mês {fm[5:7]}/{fm[:4]}? Manda SIM pra confirmar ou NÃO pra cancelar.")
 async def resumo_cmd(update, context):
     txt = " ".join(context.args)
     fm = parse_mes(txt) if txt else mes_atual_str()
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("📋 Resumido", callback_data=f"resumo_simples:{fm}"), InlineKeyboardButton("🧾 Detalhado", callback_data=f"resumo_detalhado:{fm}")]])
     await update.message.reply_text(f"Resumo de {fm[5:7]}/{fm[:4]} - quer como?", reply_markup=kb)
 async def apagar_tudo_cmd(update, context):
-    g = supabase.table("gastos").select("*").execute().data or []
-    for x in g:
-        supabase.table("gastos").delete().eq("id", x["id"]).execute()
-    d = supabase.table("despesas").select("*").execute().data or []
-    for x in d:
-        supabase.table("despesas").delete().eq("id", x["id"]).execute()
-    set_saldo(0)
-    await update.message.reply_text("🗑️ TUDO apagado!")
-    await resumo(update, context)
+    context.user_data["esperando"] = "confirmar_apagar_tudo"
+    await update.message.reply_text("⚠️ ATENÇÃO! Isso vai apagar TUDO e zerar o saldo.\nVou mandar um backup antes.\nManda SIM pra apagar tudo ou NÃO pra cancelar.")
 
 def main():
+    print("Bot rodando (webhook)...")
     app = ApplicationBuilder().token(TOKEN).build()
+    # Trava de segurança ANTES de tudo
+    app.add_handler(TypeHandler(Update, so_permitidos), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("despesa", despesa_cmd))
     app.add_handler(CommandHandler("exportar", exportar_cmd))
@@ -392,7 +501,6 @@ def main():
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=WEBHOOK_URL)
-    print("Bot rodando (webhook)...")
 
 if __name__ == "__main__":
     main()
