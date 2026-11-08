@@ -46,7 +46,6 @@ def parse_mes(txt):
 async def resumo(update, context, filtro_mes=None):
     g = supabase.table("gastos").select("*").execute().data or []
     d = supabase.table("despesas").select("*").execute().data or []
-    # SE NÃO PASSAR MÊS, MOSTRA SÓ O MÊS ATUAL
     if not filtro_mes:
         filtro_mes = mes_atual_str()
     g = [x for x in g if mes_de(x) == filtro_mes]
@@ -83,16 +82,21 @@ async def apagar_gasto_por_id(gid):
         set_saldo(get_saldo() + float(g["valor"]))
     return g
 
-async def zerar_mes():
-    # ZERA TUDO DO MÊS ATUAL, MAS MANTÉM OS MESES ANTERIORES
+async def zerar_mes(filtro_mes=None):
+    if not filtro_mes:
+        filtro_mes = mes_atual_str()
+    # APAGA SÓ O MÊS QUE VOCÊ PEDIU
     g = supabase.table("gastos").select("*").execute().data or []
     for x in g:
-        if mes_de(x) == mes_atual_str():
+        if mes_de(x) == filtro_mes:
             supabase.table("gastos").delete().eq("id", x["id"]).execute()
-    d = supabase.table("despesas").select("*").eq("status", "pago").execute().data or []
-    for x in d:
-        supabase.table("despesas").update({"status": "pendente"}).eq("id", x["id"]).execute()
-    set_saldo(0)
+    # Se for o mês atual, zera saldo e despesas também
+    if filtro_mes == mes_atual_str():
+        d = supabase.table("despesas").select("*").eq("status", "pago").execute().data or []
+        for x in d:
+            supabase.table("despesas").update({"status": "pendente"}).eq("id", x["id"]).execute()
+        set_saldo(0)
+    return filtro_mes
 
 async def on_button(update, context):
     q = update.callback_query
@@ -128,8 +132,8 @@ async def on_button(update, context):
             ap = await apagar_gasto_por_id(g[0]["id"])
             await q.message.reply_text(f"🗑️ Apagado: {ap['descricao']} - R$ {float(ap['valor']):.2f} ({ap['tipo']})")
     elif q.data == "zerar_mes":
-        context.user_data["esperando"] = "confirmar_zerar"
-        await q.message.reply_text("⚠️ Zerar o mês?\nVai apagar TODOS os gastos de NOVEMBRO, zerar o saldo pra R$ 0.00 e voltar as despesas pra pendente.\nSetembro/outubro ficam salvos, você ainda vê com: resumo setembro\n\nManda SIM pra confirmar ou NÃO pra cancelar.")
+        context.user_data["esperando"] = f"confirmar_zerar:{mes_atual_str()}"
+        await q.message.reply_text(f"⚠️ Zerar o mês {mes_atual_str()[5:7]}/{mes_atual_str()[:4]}?\nVai apagar TODOS os gastos desse mês e zerar o saldo.\n\nSe quiser zerar outro mês, não clica aqui. Manda direto: zerar setembro\n\nManda SIM pra confirmar ou NÃO pra cancelar.")
         return
     await resumo(update, context)
 
@@ -137,12 +141,14 @@ async def on_text(update, context):
     o = update.message.text.strip()
     tx = o.lower()
     esp = context.user_data.get("esperando")
-    if esp == "confirmar_zerar":
+    # CONFIRMAR ZERAR - agora com o mês dentro do esperando
+    if esp and esp.startswith("confirmar_zerar"):
+        filtro = esp.split(":")[1] if ":" in esp else mes_atual_str()
         context.user_data.clear()
         if tx == "sim":
-            await zerar_mes()
-            await update.message.reply_text("🔄 Mês zerado! Tudo do mês atual apagado, saldo zerado. Começando do zero.")
-            await resumo(update, context)
+            await zerar_mes(filtro)
+            await update.message.reply_text(f"🔄 Mês {filtro[5:7]}/{filtro[:4]} zerado! Começando do zero.")
+            await resumo(update, context, filtro_mes=filtro)
         else:
             await update.message.reply_text("Cancelado, nada foi apagado.")
         return
@@ -187,6 +193,12 @@ async def on_text(update, context):
             await resumo(update, context)
         except:
             await update.message.reply_text("ID inválido.")
+        return
+    # ZERAR COM MÊS ESPECÍFICO
+    if tx.startswith("zerar"):
+        fm = parse_mes(o) or mes_atual_str()
+        context.user_data["esperando"] = f"confirmar_zerar:{fm}"
+        await update.message.reply_text(f"⚠️ Zerar o mês {fm[5:7]}/{fm[:4]}? Vai apagar todos os gastos desse mês.\nManda SIM pra confirmar ou NÃO pra cancelar.")
         return
     if tx.startswith("apagar"):
         m = re.search(r"(\d+)", o)
@@ -265,7 +277,7 @@ async def on_text(update, context):
         await update.message.reply_text(f"✅ Saída: {d} - R$ {v:.2f} ({tipo})")
         await resumo(update, context)
         return
-    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\napagar ultimo")
+    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nzerar setembro\napagar ultimo")
 
 async def despesa_cmd(update, context):
     try:
@@ -289,9 +301,11 @@ async def exportar_cmd(update, context):
     out.seek(0)
     await update.message.reply_document(document=out.getvalue().encode(), filename="backup.csv", caption=f"Saldo: R$ {get_saldo():.2f}")
 async def zerar_mes_cmd(update, context):
-    await zerar_mes()
-    await update.message.reply_text("🔄 Mês zerado! Tudo do mês atual apagado, saldo zerado.")
-    await resumo(update, context)
+    txt = " ".join(context.args)
+    fm = parse_mes(txt) if txt else mes_atual_str()
+    await zerar_mes(fm)
+    await update.message.reply_text(f"🔄 Mês {fm[5:7]}/{fm[:4]} zerado!")
+    await resumo(update, context, filtro_mes=fm)
 async def resumo_cmd(update, context):
     txt = " ".join(context.args)
     fm = parse_mes(txt) if txt else None
@@ -304,7 +318,7 @@ async def apagar_tudo_cmd(update, context):
     for x in d:
         supabase.table("despesas").delete().eq("id", x["id"]).execute()
     set_saldo(0)
-    await update.message.reply_text("🗑️ TUDO apagado! Gastos, despesas e saldo zerados. Começando do zero total.")
+    await update.message.reply_text("🗑️ TUDO apagado!")
     await resumo(update, context)
 
 def main():
