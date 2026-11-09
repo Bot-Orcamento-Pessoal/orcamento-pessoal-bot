@@ -220,16 +220,14 @@ async def zerar_mes(filtro_mes=None):
     if not filtro_mes:
         filtro_mes = mes_atual_str()
     try:
-        # 1. Apaga gastos daquele mês
         g = supabase.table("gastos").select("*").execute().data or []
         for x in g:
             if mes_de(x) == filtro_mes:
                 supabase.table("gastos").delete().eq("id", x["id"]).execute()
-        # 2. NOVO: Apaga TODAS as despesas também, porque os valores variam todo mês
+        # Zerar apaga TODAS as despesas também, porque os valores variam todo mês
         d = supabase.table("despesas").select("*").execute().data or []
         for x in d:
             supabase.table("despesas").delete().eq("id", x["id"]).execute()
-        # 3. Zera o saldo
         set_saldo(0)
     except Exception as e:
         print(f"Erro zerar_mes: {e}")
@@ -419,13 +417,17 @@ async def on_text(update, context):
     limpo = o
     for p in [r"\bcartao\b", r"\bcartão\b", r"\bcredito\b", r"\bcrédito\b", r"\bsodexo\b", r"\bvale\b", r"\bpix\b", r"\bdinheiro\b", r"\bdebito\b", r"\bdébito\b"]:
         limpo = re.sub(p, "", limpo, flags=re.IGNORECASE)
+    # NOVO: ordem não importa - pega sempre o último número como valor
     def pega_num(s):
-        m = re.search(r"(\d+[.,]?\d*)", s)
-        return float(m.group(1).replace(",", ".")) if m else None
+        m = re.findall(r"(\d+[.,]?\d*)", s)
+        return float(m[-1].replace(",", ".")) if m else None
     def pega_desc(s, rem):
         d = re.sub(rem, "", s, flags=re.IGNORECASE)
-        d = re.sub(r"\d+[.,]?\d*", "", d).strip()
-        return d or "Item"
+        # tira o valor do começo ou do fim, onde ele estiver
+        d = re.sub(r"\s*\d+[.,]?\d*\s*$", "", d.strip())
+        d = re.sub(r"^\s*\d+[.,]?\d*\s*", "", d.strip())
+        d = d.strip(" ,-")
+        return d.title() if d else "Item"
     if tx.startswith("despesa"):
         linhas = [l.strip() for l in o.split("\n") if l.strip()]
         ok = 0
@@ -438,7 +440,7 @@ async def on_text(update, context):
                 except Exception as e:
                     print(f"Erro despesa linha: {e}")
                     continue
-                d = desc.strip()
+                d = desc.strip().title()
             else:
                 v = pega_num(linha_limpa)
                 if v is None:
@@ -458,7 +460,7 @@ async def on_text(update, context):
         if v is None:
             await update.message.reply_text("Ex: entrada salario 3000")
             return
-        d = pega_desc(limpo, r"entrada|recebi|salario|salário")
+        d = pega_desc(limpo, r"entrada|recebi")
         set_saldo(get_saldo() + v)
         await update.message.reply_text(f"✅ Entrada: {escape_md(d)} - R$ {v:.2f}")
         await resumo(update, context)
