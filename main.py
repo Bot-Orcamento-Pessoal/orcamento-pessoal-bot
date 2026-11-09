@@ -30,7 +30,6 @@ async def so_permitidos(update, context):
         raise ApplicationHandlerStop
 
 def escape_md(s):
-    # Escapa _ * [ ] ( ) para não quebrar o Markdown
     s = str(s)
     for c in ["_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"]:
         s = s.replace(c, "\\" + c)
@@ -60,12 +59,10 @@ def mes_atual_str():
     return hoje_sp().strftime("%Y-%m")
 
 def mes_de(g):
-    # Converte created_at/data para fuso SP antes de pegar o mês
     raw = g.get("data") or g.get("created_at") or ""
     if not raw:
         return ""
     try:
-        # Ex: 2026-11-08T01:00:00+00:00
         dt = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=datetime.timezone.utc)
@@ -111,7 +108,6 @@ def get_ultimo_mes_visto():
             return None
         v = int(float(r.data[0]["valor"]))
         s = str(v)
-        # CORRIGIDO: era s[5:7], o certo é s[4:6]
         return f"{s[:4]}-{s[4:6]}" if len(s) == 6 else None
     except Exception as e:
         print(f"Erro get_ultimo_mes_visto: {e}")
@@ -202,7 +198,7 @@ async def start(update, context):
     ant = await checar_virada(update)
     if ant:
         context.user_data["esperando"] = f"confirmar_zerar:{ant}"
-        await update.message.reply_text(f"👋 Bem-vindo de volta!\n\n📅 Vi que virou o mês! Última vez que você falou comigo foi em {ant[5:7]}/{ant[:4]}.\n\nQuer zerar {ant[5:7]}/{ant[:4]} pra começar {mes_atual_str()[5:7]}/{mes_atual_str()[:4]} do zero?\nManda SIM pra zerar ou NÃO pra manter.")
+        await update.message.reply_text(f"👋 Bem-vindo de volta!\n\n📅 Vi que virou o mês! Última vez que você falou comigo foi em {ant[5:7]}/{ant[:4]}.\n\nQuer zerar {ant[5:7]}/{ant[:4]} pra começar {mes_atual_str()[5:7]}/{mes_atual_str()[:4]} do zero?\nIsso vai apagar gastos E despesas.\nManda SIM pra zerar ou NÃO pra manter.")
         return
     await update.message.reply_text("Bot de orçamento\nBem-vindo!", reply_markup=menu())
 
@@ -224,15 +220,17 @@ async def zerar_mes(filtro_mes=None):
     if not filtro_mes:
         filtro_mes = mes_atual_str()
     try:
+        # 1. Apaga gastos daquele mês
         g = supabase.table("gastos").select("*").execute().data or []
         for x in g:
             if mes_de(x) == filtro_mes:
                 supabase.table("gastos").delete().eq("id", x["id"]).execute()
-        if filtro_mes == mes_atual_str() or filtro_mes == mes_anterior_str():
-            d = supabase.table("despesas").select("*").eq("status", "pago").execute().data or []
-            for x in d:
-                supabase.table("despesas").update({"status": "pendente"}).eq("id", x["id"]).execute()
-            set_saldo(0)
+        # 2. NOVO: Apaga TODAS as despesas também, porque os valores variam todo mês
+        d = supabase.table("despesas").select("*").execute().data or []
+        for x in d:
+            supabase.table("despesas").delete().eq("id", x["id"]).execute()
+        # 3. Zera o saldo
+        set_saldo(0)
     except Exception as e:
         print(f"Erro zerar_mes: {e}")
     return filtro_mes
@@ -257,11 +255,11 @@ async def on_button(update, context):
         g = supabase.table("gastos").select("*").order("id").execute().data or []
         g = [x for x in g if mes_de(x) == mes_atual_str()]
         t = "Nenhum gasto nesse mês." if not g else "\n".join([f"{x['id']}. {escape_md(x['descricao'])} - R$ {float(x['valor']):.2f} - {x['tipo']}" for x in g])
-        await q.message.reply_text(t + "\n\nPra apagar um, manda: apagar 3")
+        await q.message.reply_text(t + "\n\nPra apagar um, manda: apagar 3\nPra apagar despesa, manda: apagar despesa 3")
     elif q.data == "listar_despesas":
         d = supabase.table("despesas").select("*").order("id").execute().data or []
         t = "Nenhuma despesa." if not d else "\n".join([f"{x['id']}. {escape_md(x['descricao'])} - R$ {float(x['valor']):.2f} - {x['status']}" for x in d])
-        await q.message.reply_text(t)
+        await q.message.reply_text(t + "\n\nPra apagar, manda: apagar despesa 3")
     elif q.data == "pagar_despesa":
         d = supabase.table("despesas").select("*").eq("status", "pendente").execute().data or []
         if not d:
@@ -279,7 +277,7 @@ async def on_button(update, context):
             await q.message.reply_text(f"🗑️ Apagado: {escape_md(ap['descricao'])} - R$ {float(ap['valor']):.2f} ({ap['tipo']})")
     elif q.data == "zerar_mes":
         context.user_data["esperando"] = f"confirmar_zerar:{mes_atual_str()}"
-        await q.message.reply_text(f"⚠️ Zerar o mês {mes_atual_str()[5:7]}/{mes_atual_str()[:4]}?\nVai apagar TODOS os gastos desse mês e zerar o saldo.\n\nSe quiser zerar outro mês, manda direto: zerar setembro\n\nManda SIM pra confirmar ou NÃO pra cancelar.")
+        await q.message.reply_text(f"⚠️ Zerar o mês {mes_atual_str()[5:7]}/{mes_atual_str()[:4]}?\nVai apagar TODOS os gastos E TODAS as despesas e zerar o saldo.\n\nSe quiser zerar outro mês, manda direto: zerar setembro\n\nManda SIM pra confirmar ou NÃO pra cancelar.")
         return
     await resumo(update, context)
 
@@ -294,11 +292,10 @@ async def on_text(update, context):
         if tx == "sim":
             await enviar_backup(update, legenda=f"Backup antes de zerar {filtro}")
             await zerar_mes(filtro)
-            await update.message.reply_text(f"🔄 Mês {filtro[5:7]}/{filtro[:4]} zerado! Começando {mes_atual_str()[5:7]}/{mes_atual_str()[:4]} do zero.")
-            await update.message.reply_text("Agora pode mandar seu primeiro gasto do mês!", reply_markup=menu())
+            await update.message.reply_text(f"🔄 Mês {filtro[5:7]}/{filtro[:4]} zerado! Gastos e despesas apagados, saldo zerado.")
+            await update.message.reply_text("Agora lança as despesas desse mês com os valores novos!", reply_markup=menu())
         else:
-            await update.message.reply_text("Beleza, mantive o mês anterior. Pode continuar normal.", reply_markup=menu())
-        # CORRIGIDO: reprocessa o gasto que ficou guardado
+            await update.message.reply_text("Beleza, mantive tudo. Pode continuar normal.", reply_markup=menu())
         if pendente:
             update.message.text = pendente
             await on_text(update, context)
@@ -322,7 +319,7 @@ async def on_text(update, context):
     ant = await checar_virada(update)
     if ant and not esp:
         context.user_data["esperando"] = f"confirmar_zerar:{ant}"
-        await update.message.reply_text(f"📅 Vi que virou o mês! Última vez foi em {ant[5:7]}/{ant[:4]}.\nQuer zerar {ant[5:7]}/{ant[:4]} pra começar do zero?\nManda SIM ou NÃO.\n\nSeu gasto de agora vai ficar guardado, depois que responder eu processo ele.")
+        await update.message.reply_text(f"📅 Vi que virou o mês! Última vez foi em {ant[5:7]}/{ant[:4]}.\nQuer zerar {ant[5:7]}/{ant[:4]} pra começar do zero? Vai apagar gastos E despesas.\nManda SIM ou NÃO.\n\nSeu gasto de agora vai ficar guardado, depois que responder eu processo ele.")
         context.user_data["pendente"] = o
         return
     if esp == "saldo":
@@ -377,9 +374,21 @@ async def on_text(update, context):
     if tx.startswith("zerar"):
         fm = parse_mes(o) or mes_atual_str()
         context.user_data["esperando"] = f"confirmar_zerar:{fm}"
-        await update.message.reply_text(f"⚠️ Zerar o mês {fm[5:7]}/{fm[:4]}? Vai apagar todos os gastos desse mês.\nManda SIM pra confirmar ou NÃO pra cancelar.")
+        await update.message.reply_text(f"⚠️ Zerar o mês {fm[5:7]}/{fm[:4]}? Vai apagar todos os gastos E todas as despesas e zerar o saldo.\nManda SIM pra confirmar ou NÃO pra cancelar.")
         return
     if tx.startswith("apagar"):
+        if "despesa" in tx:
+            m = re.search(r"(\d+)", o)
+            if not m:
+                await update.message.reply_text("Manda: apagar despesa 3")
+                return
+            try:
+                supabase.table("despesas").delete().eq("id", int(m.group(1))).execute()
+                await update.message.reply_text(f"🗑️ Despesa {m.group(1)} apagada!")
+            except Exception as e:
+                print(f"Erro apagar despesa: {e}")
+                await update.message.reply_text("Não achei essa despesa.")
+            return
         m = re.search(r"(\d+)", o)
         if "ultimo" in tx or "último" in tx or not m:
             g = supabase.table("gastos").select("*").order("id", desc=True).limit(1).execute().data or []
@@ -418,13 +427,31 @@ async def on_text(update, context):
         d = re.sub(r"\d+[.,]?\d*", "", d).strip()
         return d or "Item"
     if tx.startswith("despesa"):
-        v = pega_num(limpo)
-        if v is None:
-            await update.message.reply_text("Use: despesa aluguel 1500")
+        linhas = [l.strip() for l in o.split("\n") if l.strip()]
+        ok = 0
+        for linha in linhas:
+            linha_limpa = re.sub(r"^despesa\s*", "", linha, flags=re.IGNORECASE)
+            if "," in linha_limpa:
+                desc, val = linha_limpa.rsplit(",", 1)
+                try:
+                    v = float(val.replace("R$", "").replace(",", "."))
+                except Exception as e:
+                    print(f"Erro despesa linha: {e}")
+                    continue
+                d = desc.strip()
+            else:
+                v = pega_num(linha_limpa)
+                if v is None:
+                    continue
+                d = pega_desc(linha_limpa, r"despesa")
+            if not d:
+                d = "Despesa"
+            supabase.table("despesas").insert({"descricao": d, "valor": v, "status": "pendente"}).execute()
+            ok += 1
+        if ok == 0:
+            await update.message.reply_text("Use: despesa aluguel, 1500\nPode mandar várias, uma por linha.")
             return
-        d = pega_desc(limpo, r"despesa")
-        supabase.table("despesas").insert({"descricao": d, "valor": v, "status": "pendente"}).execute()
-        await update.message.reply_text(f"✅ Despesa {escape_md(d)} - R$ {v:.2f}")
+        await update.message.reply_text(f"✅ {ok} despesa(s) adicionada(s)!")
         return
     if tx.startswith(("entrada", "recebi", "salario", "salário")):
         v = pega_num(limpo)
@@ -457,27 +484,40 @@ async def on_text(update, context):
         await update.message.reply_text(f"✅ Saída: {escape_md(d)} - R$ {v:.2f} ({tipo})")
         await resumo(update, context)
         return
-    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nzerar setembro\napagar ultimo")
+    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nzerar setembro\napagar ultimo\napagar despesa 3")
 
 async def despesa_cmd(update, context):
     try:
-        arg = " ".join(context.args)
-        desc, val = arg.rsplit(",", 1)
-        v = float(val.strip().replace(",", "."))
-        supabase.table("despesas").insert({"descricao": desc.strip(), "valor": v, "status": "pendente"}).execute()
-        await update.message.reply_text(f"Despesa '{escape_md(desc.strip())}' adicionada.")
+        texto = " ".join(context.args)
+        linhas = [l.strip() for l in texto.replace(";", "\n").split("\n") if l.strip()]
+        if len(linhas) == 1 and texto.count(",") > 1:
+            partes = [p.strip() for p in texto.split(",")]
+            linhas = []
+            for i in range(0, len(partes)-1, 2):
+                linhas.append(f"{partes[i]}, {partes[i+1]}")
+        ok = 0
+        for linha in linhas:
+            if "," not in linha:
+                continue
+            desc, val = linha.rsplit(",", 1)
+            v = float(val.strip().replace("R$", "").replace(",", "."))
+            supabase.table("despesas").insert({"descricao": desc.strip(), "valor": v, "status": "pendente"}).execute()
+            ok += 1
+        if ok == 0:
+            await update.message.reply_text("Use: /despesa aluguel, 1500\nluz, 200")
+            return
+        await update.message.reply_text(f"✅ {ok} despesa(s) adicionada(s).")
     except Exception as e:
         print(f"Erro despesa_cmd: {e}")
-        await update.message.reply_text("Use: /despesa aluguel, 1500")
+        await update.message.reply_text("Use assim, uma por linha:\n/despesa aluguel, 1500\nluz, 200\ninternet, 100")
 async def exportar_cmd(update, context):
     data = gerar_csv_bytes()
     await update.message.reply_document(document=data, filename="backup.csv", caption=f"Saldo: R$ {get_saldo():.2f}")
 async def zerar_mes_cmd(update, context):
     txt = " ".join(context.args)
     fm = parse_mes(txt) if txt else mes_atual_str()
-    # Pede confirmação via on_text, não zera direto
     context.user_data["esperando"] = f"confirmar_zerar:{fm}"
-    await update.message.reply_text(f"⚠️ Zerar o mês {fm[5:7]}/{fm[:4]}? Manda SIM pra confirmar ou NÃO pra cancelar.")
+    await update.message.reply_text(f"⚠️ Zerar o mês {fm[5:7]}/{fm[:4]}? Vai apagar gastos E despesas. Manda SIM pra confirmar ou NÃO pra cancelar.")
 async def resumo_cmd(update, context):
     txt = " ".join(context.args)
     fm = parse_mes(txt) if txt else mes_atual_str()
@@ -490,7 +530,6 @@ async def apagar_tudo_cmd(update, context):
 def main():
     print("Bot rodando (webhook)...")
     app = ApplicationBuilder().token(TOKEN).build()
-    # Trava de segurança ANTES de tudo
     app.add_handler(TypeHandler(Update, so_permitidos), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("despesa", despesa_cmd))
