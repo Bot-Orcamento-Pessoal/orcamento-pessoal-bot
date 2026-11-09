@@ -236,7 +236,7 @@ async def zerar_mes(filtro_mes=None):
         print(f"Erro zerar_mes: {e}")
     return filtro_mes
 
-# ---------- NOVO: ordem não importa ----------
+# ---------- NOVO: ordem não importa + com ou sem vírgula ----------
 def pega_num(s):
     m = re.findall(r"(\d+[.,]?\d*)", s)
     return float(m[-1].replace(",", ".")) if m else None
@@ -262,7 +262,7 @@ async def on_button(update, context):
         await q.message.reply_text("Envie o saldo. Ex: 3500")
     elif q.data.startswith("gasto_"):
         context.user_data["esperando"] = q.data
-        await q.message.reply_text("Envie um por linha. Ex:\nAlmoço, 35")
+        await q.message.reply_text("Envie um por linha. Ex:\nAlmoço, 35\nPode ser com ou sem vírgula.")
     elif q.data == "listar_gastos":
         g = supabase.table("gastos").select("*").order("id").execute().data or []
         g = [x for x in g if mes_de(x) == mes_atual_str()]
@@ -349,21 +349,31 @@ async def on_text(update, context):
     if esp and esp.startswith("gasto_"):
         tipo = esp.replace("gasto_", "")
         tot = 0
+        ok = 0
         for linha in o.split("\n"):
-            if "," not in linha:
+            linha = linha.strip()
+            if not linha:
                 continue
-            desc, val = linha.rsplit(",", 1)
-            try:
-                v = float(val.replace("R$", "").replace(",", "."))
-            except Exception as e:
-                print(f"Erro gasto linha: {e}")
-                continue
-            supabase.table("gastos").insert({"descricao": desc.strip(), "valor": v, "tipo": tipo}).execute()
+            if "," in linha:
+                desc, val = linha.rsplit(",", 1)
+                try:
+                    v = float(val.replace("R$", "").replace(",", "."))
+                except Exception as e:
+                    print(f"Erro gasto linha: {e}")
+                    continue
+                d = desc.strip().title()
+            else:
+                v = pega_num(linha)
+                if v is None:
+                    continue
+                d = pega_desc(linha, r"")
+            supabase.table("gastos").insert({"descricao": d, "valor": v, "tipo": tipo}).execute()
             tot += v
+            ok += 1
             if tipo == "dinheiro":
                 set_saldo(get_saldo() - v)
         context.user_data.clear()
-        await update.message.reply_text(f"Registrado: R$ {tot:.2f}")
+        await update.message.reply_text(f"Registrado: {ok} item(ns) - R$ {tot:.2f}")
         await resumo(update, context)
         return
     if esp == "pagar":
@@ -474,26 +484,43 @@ async def on_text(update, context):
         await update.message.reply_text(f"✅ {ok} despesa(s) adicionada(s)!")
         return
     if tx.startswith(("entrada", "recebi", "salario", "salário")):
-        v = pega_num(limpo)
-        if v is None:
-            await update.message.reply_text("Ex: entrada salario 3000")
-            return
-        d = pega_desc(limpo, r"entrada|recebi")
-        set_saldo(get_saldo() + v)
-        supabase.table("gastos").insert({"descricao": d, "valor": v, "tipo": "entrada"}).execute()
-        await update.message.reply_text(f"✅ Entrada: {escape_md(d)} - R$ {v:.2f}")
+        linhas = [l.strip() for l in o.split("\n") if l.strip()]
+        ok = 0
+        tot = 0
+        for linha in linhas:
+            ll = re.sub(r"\b(cartao|cartão|credito|crédito|sodexo|vale|pix|dinheiro|debito|débito)\b", "", linha, flags=re.IGNORECASE)
+            v = pega_num(ll)
+            if v is None:
+                continue
+            d = pega_desc(ll, r"entrada|recebi")
+            set_saldo(get_saldo() + v)
+            supabase.table("gastos").insert({"descricao": d, "valor": v, "tipo": "entrada"}).execute()
+            ok += 1
+            tot += v
+        await update.message.reply_text(f"✅ {ok} entrada(s) lançada(s) - R$ {tot:.2f}")
         await resumo(update, context)
         return
     if tx.startswith(("saida", "saída", "gasto", "gastei", "paguei")):
-        v = pega_num(limpo)
-        if v is None:
-            await update.message.reply_text("Ex: saida mercado 50")
-            return
-        d = pega_desc(limpo, r"saida|saída|gasto|gastei|paguei")
-        supabase.table("gastos").insert({"descricao": d, "valor": v, "tipo": tipo}).execute()
-        if tipo == "dinheiro":
-            set_saldo(get_saldo() - v)
-        await update.message.reply_text(f"✅ Saída: {escape_md(d)} - R$ {v:.2f} ({tipo})")
+        linhas = [l.strip() for l in o.split("\n") if l.strip()]
+        ok = 0
+        tot = 0
+        for linha in linhas:
+            t_linha = "dinheiro"
+            if re.search(r"\b(cartao|cartão|credito|crédito)\b", linha.lower()):
+                t_linha = "cartao"
+            elif re.search(r"\b(sodexo|vale)\b", linha.lower()):
+                t_linha = "sodexo"
+            ll = re.sub(r"\b(cartao|cartão|credito|crédito|sodexo|vale|pix|dinheiro|debito|débito)\b", "", linha, flags=re.IGNORECASE)
+            v = pega_num(ll)
+            if v is None:
+                continue
+            d = pega_desc(ll, r"saida|saída|gasto|gastei|paguei")
+            supabase.table("gastos").insert({"descricao": d, "valor": v, "tipo": t_linha}).execute()
+            if t_linha == "dinheiro":
+                set_saldo(get_saldo() - v)
+            ok += 1
+            tot += v
+        await update.message.reply_text(f"✅ {ok} saída(s) lançada(s) - R$ {tot:.2f}")
         await resumo(update, context)
         return
     v = pega_num(limpo)
