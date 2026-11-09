@@ -178,6 +178,8 @@ async def resumo(update, context, filtro_mes=None, detalhado=False):
     elif detalhado:
         agrupado = {}
         for x in g:
+            if x["tipo"] == "entrada":
+                continue
             nome = x["descricao"].strip().title()
             agrupado[nome] = agrupado.get(nome, 0) + float(x["valor"])
         ordenado = sorted(agrupado.items(), key=lambda item: item[1], reverse=True)
@@ -211,6 +213,8 @@ async def apagar_gasto_por_id(gid):
         supabase.table("gastos").delete().eq("id", gid).execute()
         if g["tipo"] == "dinheiro":
             set_saldo(get_saldo() + float(g["valor"]))
+        elif g["tipo"] == "entrada":
+            set_saldo(get_saldo() - float(g["valor"]))
         return g
     except Exception as e:
         print(f"Erro apagar_gasto: {e}")
@@ -224,7 +228,6 @@ async def zerar_mes(filtro_mes=None):
         for x in g:
             if mes_de(x) == filtro_mes:
                 supabase.table("gastos").delete().eq("id", x["id"]).execute()
-        # Zerar apaga TODAS as despesas também, porque os valores variam todo mês
         d = supabase.table("despesas").select("*").execute().data or []
         for x in d:
             supabase.table("despesas").delete().eq("id", x["id"]).execute()
@@ -232,6 +235,17 @@ async def zerar_mes(filtro_mes=None):
     except Exception as e:
         print(f"Erro zerar_mes: {e}")
     return filtro_mes
+
+# ---------- NOVO: ordem não importa ----------
+def pega_num(s):
+    m = re.findall(r"(\d+[.,]?\d*)", s)
+    return float(m[-1].replace(",", ".")) if m else None
+def pega_desc(s, rem):
+    d = re.sub(rem, "", s, flags=re.IGNORECASE)
+    d = re.sub(r"\s*\d+[.,]?\d*\s*$", "", d.strip())
+    d = re.sub(r"^\s*\d+[.,]?\d*\s*", "", d.strip())
+    d = d.strip(" ,-")
+    return d.title() if d else "Item"
 
 async def on_button(update, context):
     q = update.callback_query
@@ -253,7 +267,7 @@ async def on_button(update, context):
         g = supabase.table("gastos").select("*").order("id").execute().data or []
         g = [x for x in g if mes_de(x) == mes_atual_str()]
         t = "Nenhum gasto nesse mês." if not g else "\n".join([f"{x['id']}. {escape_md(x['descricao'])} - R$ {float(x['valor']):.2f} - {x['tipo']}" for x in g])
-        await q.message.reply_text(t + "\n\nPra apagar um, manda: apagar 3\nPra apagar despesa, manda: apagar despesa 3")
+        await q.message.reply_text(t + "\n\nPra apagar um, manda: apagar 3\nPra apagar despesa, manda: apagar despesa 3\nPra apagar entrada, manda: apagar entrada 3000")
     elif q.data == "listar_despesas":
         d = supabase.table("despesas").select("*").order("id").execute().data or []
         t = "Nenhuma despesa." if not d else "\n".join([f"{x['id']}. {escape_md(x['descricao'])} - R$ {float(x['valor']):.2f} - {x['status']}" for x in d])
@@ -374,6 +388,21 @@ async def on_text(update, context):
         context.user_data["esperando"] = f"confirmar_zerar:{fm}"
         await update.message.reply_text(f"⚠️ Zerar o mês {fm[5:7]}/{fm[:4]}? Vai apagar todos os gastos E todas as despesas e zerar o saldo.\nManda SIM pra confirmar ou NÃO pra cancelar.")
         return
+    if tx.startswith("apagar entrada"):
+        v = pega_num(o)
+        if v is None:
+            await update.message.reply_text("Use: apagar entrada 3000")
+            return
+        set_saldo(get_saldo() - v)
+        try:
+            g = supabase.table("gastos").select("*").eq("tipo", "entrada").eq("valor", v).order("id", desc=True).limit(1).execute().data
+            if g:
+                supabase.table("gastos").delete().eq("id", g[0]["id"]).execute()
+        except Exception as e:
+            print(f"Erro apagar entrada: {e}")
+        await update.message.reply_text(f"🗑️ Entrada de R$ {v:.2f} apagada, saldo corrigido.")
+        await resumo(update, context)
+        return
     if tx.startswith("apagar"):
         if "despesa" in tx:
             m = re.search(r"(\d+)", o)
@@ -417,17 +446,6 @@ async def on_text(update, context):
     limpo = o
     for p in [r"\bcartao\b", r"\bcartão\b", r"\bcredito\b", r"\bcrédito\b", r"\bsodexo\b", r"\bvale\b", r"\bpix\b", r"\bdinheiro\b", r"\bdebito\b", r"\bdébito\b"]:
         limpo = re.sub(p, "", limpo, flags=re.IGNORECASE)
-    # NOVO: ordem não importa - pega sempre o último número como valor
-    def pega_num(s):
-        m = re.findall(r"(\d+[.,]?\d*)", s)
-        return float(m[-1].replace(",", ".")) if m else None
-    def pega_desc(s, rem):
-        d = re.sub(rem, "", s, flags=re.IGNORECASE)
-        # tira o valor do começo ou do fim, onde ele estiver
-        d = re.sub(r"\s*\d+[.,]?\d*\s*$", "", d.strip())
-        d = re.sub(r"^\s*\d+[.,]?\d*\s*", "", d.strip())
-        d = d.strip(" ,-")
-        return d.title() if d else "Item"
     if tx.startswith("despesa"):
         linhas = [l.strip() for l in o.split("\n") if l.strip()]
         ok = 0
@@ -462,6 +480,7 @@ async def on_text(update, context):
             return
         d = pega_desc(limpo, r"entrada|recebi")
         set_saldo(get_saldo() + v)
+        supabase.table("gastos").insert({"descricao": d, "valor": v, "tipo": "entrada"}).execute()
         await update.message.reply_text(f"✅ Entrada: {escape_md(d)} - R$ {v:.2f}")
         await resumo(update, context)
         return
@@ -486,7 +505,7 @@ async def on_text(update, context):
         await update.message.reply_text(f"✅ Saída: {escape_md(d)} - R$ {v:.2f} ({tipo})")
         await resumo(update, context)
         return
-    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nzerar setembro\napagar ultimo\napagar despesa 3")
+    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nzerar setembro\napagar ultimo\napagar despesa 3\napagar entrada 3000")
 
 async def despesa_cmd(update, context):
     try:
