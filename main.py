@@ -388,17 +388,17 @@ async def on_button(update, context):
         g = supabase.table("gastos").select("*").order("id").execute().data or []
         g = [x for x in g if mes_de(x) == mes_atual_str()]
         t = "Nenhum gasto nesse mês." if not g else "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f} - {x['tipo']}" for x in g])
-        await q.message.reply_text(t + "\n\nPra apagar um, manda: apagar 3\nPra apagar despesa, manda: apagar despesa 3\nPra apagar entrada, manda: apagar entrada 3000")
+        await q.message.reply_text(t + "\n\nPra editar, manda: editar 3 45,90\nPra apagar um, manda: apagar 3\nPra apagar despesa, manda: apagar despesa 3\nPra apagar entrada, manda: apagar entrada 3000")
     elif q.data == "listar_despesas":
         d = supabase.table("despesas").select("*").order("id").execute().data or []
         t = "Nenhuma despesa." if not d else "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f} - {x['status']}" for x in d])
-        await q.message.reply_text(t + "\n\nPra apagar, manda: apagar despesa 3")
+        await q.message.reply_text(t + "\n\nPra editar, manda: editar despesa 3 187,40\nPra apagar, manda: apagar despesa 3")
     elif q.data == "pagar_despesa":
         d = supabase.table("despesas").select("*").eq("status", "pendente").execute().data or []
         if not d:
             await q.message.reply_text("Nenhuma pendente.")
         else:
-            t = "Pendentes - envie o ID:\n" + "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f}" for x in d])
+            t = "Pendentes - envie o ID (ou vários, ex: 1 2 5):\n" + "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f}" for x in d])
             context.user_data["esperando"] = "pagar"
             await q.message.reply_text(t)
     elif q.data == "apagar_ultimo":
@@ -518,24 +518,46 @@ async def tratar_texto(update, context, o):
         return
 
     if esp == "pagar":
+        ids = [int(x) for x in re.findall(r"\d+", o)]
+        if not ids:
+            await update.message.reply_text("Envie os IDs, ex: 1 2 5")
+            return
+        pagas, ja_pagas, nao_achou = [], [], []
+        total = 0
         try:
-            i = int(o)
-            r = supabase.table("despesas").select("*").eq("id", i).execute().data
-            if not r:
-                await update.message.reply_text("ID inválido.")
-                return
-            d = r[0]
-            if d["status"] == "pago":
-                await update.message.reply_text("Essa despesa já está paga.")
-                return
-            supabase.table("despesas").update({"status": "pago"}).eq("id", i).execute()
-            set_saldo(get_saldo() - float(d["valor"]))
-            context.user_data.clear()
-            await update.message.reply_text(f"Paga: {d['descricao']}")
-            await resumo(update, context)
+            for i in dict.fromkeys(ids):
+                r = supabase.table("despesas").select("*").eq("id", i).execute().data
+                if not r:
+                    nao_achou.append(i)
+                    continue
+                d = r[0]
+                if d["status"] == "pago":
+                    ja_pagas.append(i)
+                    continue
+                supabase.table("despesas").update({"status": "pago"}).eq("id", i).execute()
+                total += float(d["valor"])
+                pagas.append(d["descricao"])
+            if total:
+                set_saldo(get_saldo() - total)
         except Exception as e:
             print(f"Erro pagar: {e}")
-            await update.message.reply_text("ID inválido.")
+            await update.message.reply_text("Deu erro ao pagar. Confira com o botão Despesas o que foi pago.")
+            return
+        if not pagas:
+            await update.message.reply_text("Nenhuma despesa paga. Confira os IDs e tente de novo.")
+            return
+        context.user_data.clear()
+        msg = f"✅ Pagas: {', '.join(pagas)}\nTotal: R$ {total:.2f}"
+        if ja_pagas:
+            msg += f"\nJá estavam pagas: {', '.join(map(str, ja_pagas))}"
+        if nao_achou:
+            msg += f"\nNão encontrei: {', '.join(map(str, nao_achou))}"
+        await update.message.reply_text(msg)
+        await resumo(update, context)
+        return
+
+    if tx.startswith("editar"):
+        await editar_item(update, context, o)
         return
 
     if tx.startswith("apagar tudo") or tx == "apagar_tudo":
@@ -675,7 +697,82 @@ async def tratar_texto(update, context, o):
         await resumo(update, context)
         return
 
-    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nzerar setembro\napagar ultimo\napagar despesa 3\napagar entrada 3000")
+    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nzerar setembro\napagar ultimo\napagar despesa 3\napagar entrada 3000\neditar 12 45,90")
+
+
+# ---------- EDITAR ----------
+async def editar_item(update, context, o):
+    ajuda = "Use:\neditar 12 45,90\neditar 12 45,90 Mercado\neditar 12 Mercado\neditar despesa 3 187,40"
+    m = re.match(r"^\s*editar\s+(despesa\s+)?(\d+)\s*(.*)$", o, flags=re.IGNORECASE | re.DOTALL)
+    if not m:
+        await update.message.reply_text(ajuda)
+        return
+    eh_despesa = bool(m.group(1))
+    iid = int(m.group(2))
+    resto = m.group(3).strip()
+    if not resto:
+        await update.message.reply_text(ajuda)
+        return
+
+    v = None
+    desc = ""
+    mv = re.match(r"^(?:R\$\s*)?(\d[\d.,]*)\s*(.*)$", resto, flags=re.DOTALL)
+    mt = re.match(r"^(.*?)\s+(?:R\$\s*)?(\d[\d.,]*)$", resto, flags=re.DOTALL)
+    try:
+        if mv:
+            v = parse_valor(mv.group(1).rstrip(".,"))
+            desc = mv.group(2)
+        elif mt:
+            v = parse_valor(mt.group(2).rstrip(".,"))
+            desc = mt.group(1)
+        else:
+            desc = resto
+    except ValueError:
+        v = None
+        desc = resto
+    desc = re.sub(r"\s+", " ", desc).strip(" ,-")
+    nova_desc = desc.title() if desc else None
+    if v is None and not nova_desc:
+        await update.message.reply_text("Não entendi o novo valor.\n" + ajuda)
+        return
+
+    tabela = "despesas" if eh_despesa else "gastos"
+    nome = "Despesa" if eh_despesa else "Gasto"
+    try:
+        r = supabase.table(tabela).select("*").eq("id", iid).execute().data
+        if not r:
+            await update.message.reply_text(f"Não achei {nome.lower()} com ID {iid}. Veja os IDs nos botões Gastos/Despesas.")
+            return
+        item = r[0]
+        ov = float(item["valor"])
+        nv = v if v is not None else ov
+        nd = nova_desc if nova_desc else item["descricao"]
+        ajuste = 0.0
+        if eh_despesa:
+            if item["status"] == "pago":
+                ajuste = ov - nv
+        elif item["tipo"] == "dinheiro":
+            ajuste = ov - nv
+        elif item["tipo"] == "entrada":
+            ajuste = nv - ov
+        supabase.table(tabela).update({"valor": nv, "descricao": nd}).eq("id", iid).execute()
+        if ajuste:
+            set_saldo(get_saldo() + ajuste)
+    except Exception as e:
+        print(f"Erro editar: {e}")
+        await update.message.reply_text("Não consegui editar. Tenta de novo.")
+        return
+    msg = f"✏️ {nome} {iid} atualizado: {nd} - R$ {nv:.2f}"
+    if ajuste:
+        msg += f"\nSaldo ajustado em R$ {ajuste:+.2f}"
+    await update.message.reply_text(msg)
+    await resumo(update, context)
+
+
+async def editar_cmd(update, context):
+    partes = update.message.text.split(None, 1)
+    resto = partes[1] if len(partes) > 1 else ""
+    await editar_item(update, context, "editar " + resto)
 
 
 # ---------- COMANDOS ----------
@@ -738,6 +835,7 @@ def main():
     app.add_handler(CommandHandler("exportar", exportar_cmd))
     app.add_handler(CommandHandler("zerar_mes", zerar_mes_cmd))
     app.add_handler(CommandHandler("resumo", resumo_cmd))
+    app.add_handler(CommandHandler("editar", editar_cmd))
     app.add_handler(CommandHandler("apagar_tudo", apagar_tudo_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
