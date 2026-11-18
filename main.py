@@ -63,11 +63,6 @@ def mes_anterior_str():
     return f"{ano}-{mes:02d}"
 
 
-def mes_afeta_tudo(fm):
-    # Só zera despesas e saldo quando o mês é o atual ou o anterior
-    return fm in (mes_atual_str(), mes_anterior_str())
-
-
 def mes_de(g):
     raw = str(g.get("data") or g.get("created_at") or "")
     if not raw:
@@ -226,6 +221,29 @@ def processar_despesas(texto):
     return ok
 
 
+# ---------- GASTOS DO MÊS (filtro no Supabase) ----------
+def gastos_do_mes(fm):
+    # Busca só o período do mês (com 1 dia de folga) e confere o mês exato no Python
+    try:
+        ano, mes = int(fm[:4]), int(fm[5:7])
+        ini = datetime.datetime(ano, mes, 1, tzinfo=TZ) - datetime.timedelta(days=1)
+        prox_ano = ano + 1 if mes == 12 else ano
+        prox_mes = 1 if mes == 12 else mes + 1
+        fim = datetime.datetime(prox_ano, prox_mes, 1, tzinfo=TZ) + datetime.timedelta(days=1)
+        f = "%Y-%m-%dT%H:%M:%SZ"
+        r = (
+            supabase.table("gastos").select("*")
+            .gte("created_at", ini.astimezone(datetime.timezone.utc).strftime(f))
+            .lt("created_at", fim.astimezone(datetime.timezone.utc).strftime(f))
+            .order("id")
+            .execute().data or []
+        )
+    except Exception as e:
+        print(f"Erro gastos_do_mes (usando busca completa): {e}")
+        r = supabase.table("gastos").select("*").order("id").execute().data or []
+    return [x for x in r if mes_de(x) == fm]
+
+
 # ---------- BACKUP ----------
 def gerar_csv_bytes():
     try:
@@ -257,19 +275,24 @@ async def enviar_backup(update, legenda="Backup automático antes de apagar"):
 
 # ---------- TELAS ----------
 async def resumo(update, context, filtro_mes=None, detalhado=False):
-    g = supabase.table("gastos").select("*").execute().data or []
-    d = supabase.table("despesas").select("*").execute().data or []
     if not filtro_mes:
         filtro_mes = mes_atual_str()
-    g = [x for x in g if mes_de(x) == filtro_mes]
-    s = get_saldo()
+    atual = filtro_mes == mes_atual_str()
+    g = gastos_do_mes(filtro_mes)
     din = sum(float(x["valor"]) for x in g if x["tipo"] == "dinheiro")
     car = sum(float(x["valor"]) for x in g if x["tipo"] == "cartao")
     sod = sum(float(x["valor"]) for x in g if x["tipo"] == "sodexo")
-    pag = sum(float(x["valor"]) for x in d if x["status"] == "pago")
+    ent = sum(float(x["valor"]) for x in g if x["tipo"] == "entrada")
     titulo = "📊 *Resumo Detalhado*" if detalhado else "📊 *Resumo*"
-    t = f"{titulo} de {filtro_mes[5:7]}/{filtro_mes[:4]}\n\n💰 Saldo atual: R$ {s:.2f}\nDinheiro: R$ {din:.2f}\nCartão: R$ {car:.2f}\nSODEXO: R$ {sod:.2f}"
-    if filtro_mes == mes_atual_str():
+    t = f"{titulo} de {filtro_mes[5:7]}/{filtro_mes[:4]}\n"
+    if atual:
+        t += f"\n💰 Saldo atual: R$ {get_saldo():.2f}"
+    t += f"\nDinheiro: R$ {din:.2f}\nCartão: R$ {car:.2f}\nSODEXO: R$ {sod:.2f}\nTotal gasto: R$ {din + car + sod:.2f}"
+    if ent:
+        t += f"\nEntradas: R$ {ent:.2f}"
+    if atual:
+        d = supabase.table("despesas").select("*").execute().data or []
+        pag = sum(float(x["valor"]) for x in d if x["status"] == "pago")
         t += f"\nPagas: R$ {pag:.2f}"
     if not g:
         t += "\n\nNenhum gasto nesse mês."
@@ -302,20 +325,24 @@ def menu():
 
 
 def aviso_zerar(fm):
-    if mes_afeta_tudo(fm):
-        return "Vai apagar TODOS os gastos desse mês e TODAS as despesas, e zerar o saldo."
-    return "Vai apagar só os gastos desse mês (despesas e saldo não mudam)."
+    if fm == mes_atual_str():
+        return "Vai apagar os gastos desse mês, TODAS as despesas e zerar o saldo (recomeça do zero)."
+    return "Vai apagar só os gastos desse mês do histórico (despesas e saldo não mudam)."
+
+
+def aviso_fechar(ant):
+    return f"Fechar {ant[5:7]}/{ant[:4]} guarda os gastos no histórico e zera as despesas e o saldo."
 
 
 async def start(update, context):
     context.user_data.clear()
     ant = await checar_virada(update)
     if ant:
-        context.user_data["esperando"] = f"confirmar_zerar:{ant}"
+        context.user_data["esperando"] = f"confirmar_fechar:{ant}"
         await update.message.reply_text(
             f"👋 Bem-vindo de volta!\n\n📅 Vi que virou o mês! Última vez que você falou comigo foi em {ant[5:7]}/{ant[:4]}.\n\n"
-            f"Quer zerar {ant[5:7]}/{ant[:4]} pra começar {mes_atual_str()[5:7]}/{mes_atual_str()[:4]} do zero?\n"
-            f"{aviso_zerar(ant)}\nManda SIM pra zerar ou NÃO pra manter."
+            f"Quer fechar {ant[5:7]}/{ant[:4]} e começar {mes_atual_str()[5:7]}/{mes_atual_str()[:4]} do zero?\n"
+            f"{aviso_fechar(ant)}\nManda SIM pra fechar ou NÃO pra manter tudo como está."
         )
         return
     await update.message.reply_text("Bot de orçamento\nBem-vindo!", reply_markup=menu())
@@ -344,13 +371,22 @@ async def apagar_gasto_por_id(gid):
         return None
 
 
+async def fechar_mes():
+    # Fecha o mês: os gastos ficam guardados; só despesas e saldo são zerados
+    try:
+        d = supabase.table("despesas").select("id").execute().data or []
+        apagar_ids("despesas", [x["id"] for x in d])
+        set_saldo(0)
+    except Exception as e:
+        print(f"Erro fechar_mes: {e}")
+
+
 async def zerar_mes(filtro_mes=None):
     if not filtro_mes:
         filtro_mes = mes_atual_str()
     try:
-        g = supabase.table("gastos").select("*").execute().data or []
-        apagar_ids("gastos", [x["id"] for x in g if mes_de(x) == filtro_mes])
-        if mes_afeta_tudo(filtro_mes):
+        apagar_ids("gastos", [x["id"] for x in gastos_do_mes(filtro_mes)])
+        if filtro_mes == mes_atual_str():
             d = supabase.table("despesas").select("id").execute().data or []
             apagar_ids("despesas", [x["id"] for x in d])
             set_saldo(0)
@@ -385,8 +421,7 @@ async def on_button(update, context):
         context.user_data["esperando"] = q.data
         await q.message.reply_text("Envie um por linha. Ex:\nAlmoço, 35\nPode ser com ou sem vírgula.")
     elif q.data == "listar_gastos":
-        g = supabase.table("gastos").select("*").order("id").execute().data or []
-        g = [x for x in g if mes_de(x) == mes_atual_str()]
+        g = gastos_do_mes(mes_atual_str())
         t = "Nenhum gasto nesse mês." if not g else "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f} - {x['tipo']}" for x in g])
         await q.message.reply_text(t + "\n\nPra editar, manda: editar 3 45,90\nPra apagar um, manda: apagar 3\nPra apagar despesa, manda: apagar despesa 3\nPra apagar entrada, manda: apagar entrada 3000")
     elif q.data == "listar_despesas":
@@ -416,7 +451,7 @@ async def on_button(update, context):
         context.user_data["esperando"] = f"confirmar_zerar:{fm}"
         await q.message.reply_text(
             f"⚠️ Zerar o mês {fm[5:7]}/{fm[:4]}?\n{aviso_zerar(fm)}\n\n"
-            "Se quiser zerar outro mês, manda direto: zerar setembro\n\n"
+            "Pra apagar os gastos de um mês passado, manda: zerar setembro\n\n"
             "Manda SIM pra confirmar ou NÃO pra cancelar."
         )
         return
@@ -432,22 +467,29 @@ async def tratar_texto(update, context, o):
     tx = o.lower()
     esp = context.user_data.get("esperando")
 
-    # Confirmação de zerar mês
-    if esp and esp.startswith("confirmar_zerar"):
+    # Confirmação de fechar mês (virada) ou zerar mês
+    if esp and (esp.startswith("confirmar_zerar") or esp.startswith("confirmar_fechar")):
+        fechar = esp.startswith("confirmar_fechar")
         filtro = esp.split(":")[1] if ":" in esp else mes_atual_str()
         pendente = context.user_data.get("pendente")
         depois = context.user_data.get("esperando_depois")
         context.user_data.clear()
         sim = tx in ("sim", "s")
         nao = tx in ("nao", "não", "n", "cancelar")
+        mes_txt = f"{filtro[5:7]}/{filtro[:4]}"
         if sim:
-            await enviar_backup(update, legenda=f"Backup antes de zerar {filtro}")
-            await zerar_mes(filtro)
-            if mes_afeta_tudo(filtro):
-                await update.message.reply_text(f"🔄 Mês {filtro[5:7]}/{filtro[:4]} zerado! Gastos e despesas apagados, saldo zerado.")
-                await update.message.reply_text("Agora lança as despesas desse mês com os valores novos!", reply_markup=menu())
+            if fechar:
+                await enviar_backup(update, legenda=f"Backup ao fechar {mes_txt}")
+                await fechar_mes()
+                await update.message.reply_text(f"🔒 Mês {mes_txt} fechado! Os gastos ficaram guardados no histórico. Despesas e saldo foram zerados.")
+                await update.message.reply_text("Agora lança o saldo inicial e as despesas do mês novo!", reply_markup=menu())
             else:
-                await update.message.reply_text(f"🔄 Gastos de {filtro[5:7]}/{filtro[:4]} apagados.", reply_markup=menu())
+                await enviar_backup(update, legenda=f"Backup antes de zerar {filtro}")
+                await zerar_mes(filtro)
+                if filtro == mes_atual_str():
+                    await update.message.reply_text(f"🔄 Mês {mes_txt} zerado! Gastos, despesas e saldo apagados. Pode recomeçar.", reply_markup=menu())
+                else:
+                    await update.message.reply_text(f"🗑️ Gastos de {mes_txt} apagados do histórico.", reply_markup=menu())
         else:
             await update.message.reply_text("Beleza, mantive tudo. Pode continuar normal.", reply_markup=menu())
         if depois:
@@ -459,10 +501,10 @@ async def tratar_texto(update, context, o):
             await tratar_texto(update, context, o)
         return
 
-    # Confirmação de apagar tudo
+    # Confirmação de apagar tudo (precisa digitar APAGAR TUDO)
     if esp and esp.startswith("confirmar_apagar_tudo"):
         context.user_data.clear()
-        if tx in ("sim", "s"):
+        if o.strip().upper() == "APAGAR TUDO":
             await enviar_backup(update, legenda="Backup antes de apagar tudo")
             await apagar_tudo()
             await update.message.reply_text("🗑️ TUDO apagado! Backup enviado antes.")
@@ -475,12 +517,13 @@ async def tratar_texto(update, context, o):
     ant = await checar_virada(update)
     if ant:
         context.user_data["esperando_depois"] = esp
-        context.user_data["esperando"] = f"confirmar_zerar:{ant}"
+        context.user_data["esperando"] = f"confirmar_fechar:{ant}"
         context.user_data["pendente"] = o
         await update.message.reply_text(
             f"📅 Vi que virou o mês! Última vez foi em {ant[5:7]}/{ant[:4]}.\n"
-            f"Quer zerar {ant[5:7]}/{ant[:4]} pra começar do zero? {aviso_zerar(ant)}\n"
-            "Manda SIM ou NÃO.\n\nSeu gasto de agora vai ficar guardado, depois que responder eu processo ele."
+            f"Quer fechar {ant[5:7]}/{ant[:4]} e começar do zero? {aviso_fechar(ant)}\n"
+            "Manda SIM pra fechar ou NÃO pra manter tudo como está.\n\n"
+            "Seu gasto de agora vai ficar guardado, depois que responder eu processo ele."
         )
         return
 
@@ -562,7 +605,7 @@ async def tratar_texto(update, context, o):
 
     if tx.startswith("apagar tudo") or tx == "apagar_tudo":
         context.user_data["esperando"] = "confirmar_apagar_tudo"
-        await update.message.reply_text("⚠️ ATENÇÃO! Isso vai apagar TODOS os gastos, despesas e zerar o saldo.\nVou mandar um backup antes, mas confirma:\nManda SIM pra apagar tudo ou NÃO pra cancelar.")
+        await update.message.reply_text("⚠️ ATENÇÃO! Isso vai apagar TODOS os gastos de TODOS os meses, todas as despesas e zerar o saldo. O histórico inteiro some.\nVou mandar um backup antes.\n\nPra confirmar, digite exatamente: APAGAR TUDO\nQualquer outra coisa cancela.")
         return
 
     if tx.startswith("zerar"):
@@ -813,7 +856,7 @@ async def resumo_cmd(update, context):
 
 async def apagar_tudo_cmd(update, context):
     context.user_data["esperando"] = "confirmar_apagar_tudo"
-    await update.message.reply_text("⚠️ ATENÇÃO! Isso vai apagar TUDO e zerar o saldo.\nVou mandar um backup antes.\nManda SIM pra apagar tudo ou NÃO pra cancelar.")
+    await update.message.reply_text("⚠️ ATENÇÃO! Isso vai apagar TODOS os gastos de TODOS os meses, todas as despesas e zerar o saldo. O histórico inteiro some.\nVou mandar um backup antes.\n\nPra confirmar, digite exatamente: APAGAR TUDO\nQualquer outra coisa cancela.")
 
 
 async def erro_geral(update, context):
