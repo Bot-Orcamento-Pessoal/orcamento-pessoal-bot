@@ -1,4 +1,4 @@
-import os, re, csv, io, datetime
+import os, re, csv, io, datetime, unicodedata
 from zoneinfo import ZoneInfo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -22,6 +22,32 @@ MESES = {"janeiro": "01", "fevereiro": "02", "marco": "03", "março": "03", "abr
 PAG_RE = r"\b(cartao|cartão|credito|crédito|sodexo|vale|pix|dinheiro|debito|débito)\b"
 # Número com R$ opcional. O grupo 1 é só o número.
 NUM_RE = r"(?:R\$\s*)?(\d[\d.,]*)"
+
+# ---------- CATEGORIAS ----------
+CATEGORIAS = {
+    "Mercado": "🛒", "Alimentação": "🍽️", "Combustível": "⛽", "Manutenção": "🔧",
+    "Transporte": "🚌", "Saúde": "💊", "Lazer": "🎉", "Compras": "👕",
+    "Casa": "🏠", "Educação": "📚", "Outros": "📦",
+}
+CAT_LISTA = list(CATEGORIAS.keys())
+CORES = {
+    "Mercado": "#2E7D32", "Alimentação": "#F9A825", "Combustível": "#EF6C00", "Manutenção": "#6D4C41",
+    "Transporte": "#1565C0", "Saúde": "#C62828", "Lazer": "#8E24AA", "Compras": "#EC407A",
+    "Casa": "#00897B", "Educação": "#3949AB", "Outros": "#757575", "Sem categoria": "#BDBDBD",
+}
+# Palavras que classificam sozinhas (sem acento/maiúscula; plural é aceito automaticamente)
+PALAVRAS_CATEGORIA = {
+    "Mercado": ["mercado", "supermercado", "feira", "acougue", "hortifruti", "atacadao", "sacolao"],
+    "Alimentação": ["almoco", "jantar", "comida", "cafe", "lanche", "padaria", "restaurante", "pizza", "ifood", "marmita", "sorvete", "acai", "pastel", "pasteis", "hamburguer", "salgado", "refeicao", "pao", "paes"],
+    "Combustível": ["combustivel", "gasolina", "gnv", "etanol", "alcool", "diesel", "posto", "abastecimento"],
+    "Manutenção": ["manutencao", "oficina", "mecanico", "oleo", "pneu", "revisao", "peca", "alinhamento", "balanceamento", "bateria", "freio", "conserto"],
+    "Transporte": ["uber", "99", "onibus", "passagem", "pedagio", "estacionamento", "metro", "taxi", "bilhete"],
+    "Saúde": ["farmacia", "remedio", "consulta", "exame", "dentista", "medico", "hospital"],
+    "Lazer": ["cinema", "bar", "viagem", "passeio", "show", "festa", "jogo", "netflix", "spotify", "ingresso", "balada"],
+    "Compras": ["roupa", "sapato", "tenis", "shopping", "camisa", "calca", "bermuda", "bolsa", "loja"],
+    "Casa": ["gas", "botijao", "reforma", "limpeza", "movel", "moveis", "lampada", "ferramenta", "tinta"],
+    "Educação": ["curso", "escola", "faculdade", "livro", "matricula", "apostila"],
+}
 
 # ---------- SEGURANÇA: só os IDs liberados ----------
 ALLOWED_IDS = set()
@@ -221,14 +247,15 @@ def processar_despesas(texto):
     return ok
 
 
-# ---------- GASTOS DO MÊS (filtro no Supabase) ----------
-def gastos_do_mes(fm):
-    # Busca só o período do mês (com 1 dia de folga) e confere o mês exato no Python
+# ---------- GASTOS POR PERÍODO (filtro no Supabase) ----------
+def gastos_entre(mes_ini, mes_fim):
+    # Busca só o período (com 1 dia de folga) e confere o mês exato no Python
     try:
-        ano, mes = int(fm[:4]), int(fm[5:7])
-        ini = datetime.datetime(ano, mes, 1, tzinfo=TZ) - datetime.timedelta(days=1)
-        prox_ano = ano + 1 if mes == 12 else ano
-        prox_mes = 1 if mes == 12 else mes + 1
+        a1, m1 = int(mes_ini[:4]), int(mes_ini[5:7])
+        a2, m2 = int(mes_fim[:4]), int(mes_fim[5:7])
+        ini = datetime.datetime(a1, m1, 1, tzinfo=TZ) - datetime.timedelta(days=1)
+        prox_ano = a2 + 1 if m2 == 12 else a2
+        prox_mes = 1 if m2 == 12 else m2 + 1
         fim = datetime.datetime(prox_ano, prox_mes, 1, tzinfo=TZ) + datetime.timedelta(days=1)
         f = "%Y-%m-%dT%H:%M:%SZ"
         r = (
@@ -239,9 +266,274 @@ def gastos_do_mes(fm):
             .execute().data or []
         )
     except Exception as e:
-        print(f"Erro gastos_do_mes (usando busca completa): {e}")
+        print(f"Erro gastos_entre (usando busca completa): {e}")
         r = supabase.table("gastos").select("*").order("id").execute().data or []
-    return [x for x in r if mes_de(x) == fm]
+    return [x for x in r if mes_ini <= mes_de(x) <= mes_fim]
+
+
+def gastos_do_mes(fm):
+    return gastos_entre(fm, fm)
+
+
+def lista_meses(fim, n):
+    ano, mes = int(fim[:4]), int(fim[5:7])
+    out = []
+    for _ in range(n):
+        out.append(f"{ano}-{mes:02d}")
+        mes -= 1
+        if mes == 0:
+            mes = 12
+            ano -= 1
+    return out[::-1]
+
+
+# ---------- CATEGORIAS: detectar, aprender, perguntar ----------
+def normalizar(s):
+    s = unicodedata.normalize("NFD", str(s).lower())
+    return "".join(c for c in s if unicodedata.category(c) != "Mn").strip()
+
+
+_IDX = {}
+for _nome, _lista in PALAVRAS_CATEGORIA.items():
+    for _p in _lista:
+        _k = normalizar(_p)
+        for _forma in (_k, _k + "s", _k + "es"):
+            _IDX.setdefault(_forma, _nome)
+
+_APRENDIDAS = None
+
+
+def aprendidas():
+    global _APRENDIDAS
+    if _APRENDIDAS is None:
+        try:
+            r = supabase.table("categoria_palavras").select("*").execute().data or []
+            _APRENDIDAS = {x["palavra"]: x["categoria"] for x in r}
+        except Exception as e:
+            print(f"Erro ao carregar categorias aprendidas: {e}")
+            return {}
+    return _APRENDIDAS
+
+
+def aprender(desc, nome):
+    chave = normalizar(desc)
+    if not chave:
+        return
+    try:
+        supabase.table("categoria_palavras").upsert({"palavra": chave, "categoria": nome}).execute()
+        aprendidas()[chave] = nome
+    except Exception as e:
+        print(f"Erro ao aprender categoria: {e}")
+
+
+def detectar_categoria(desc):
+    n = normalizar(desc)
+    ap = aprendidas()
+    if ap.get(n) in CATEGORIAS:
+        return ap[n]
+    tokens = re.findall(r"\w+", n)
+    for t in tokens:
+        if ap.get(t) in CATEGORIAS:
+            return ap[t]
+    for t in tokens:
+        if t in _IDX:
+            return _IDX[t]
+    return None
+
+
+def salvar_gasto(desc, valor, tipo):
+    # Salva o gasto já com a categoria (se reconhecida). Devolve (id, categoria)
+    cat = detectar_categoria(desc)
+    dados = {"descricao": desc, "valor": valor, "tipo": tipo}
+    if cat:
+        dados["categoria"] = cat
+    try:
+        r = supabase.table("gastos").insert(dados).execute()
+    except Exception as e:
+        if "categoria" not in dados:
+            raise
+        print(f"Erro ao salvar com categoria (a coluna existe?): {e}")
+        dados.pop("categoria")
+        cat = None
+        r = supabase.table("gastos").insert(dados).execute()
+    gid = r.data[0]["id"] if r.data else None
+    return gid, cat
+
+
+def linha_recibo(d, v, cat, tipo=None):
+    emoji = CATEGORIAS.get(cat, "❔")
+    sufixo = f" ({tipo})" if tipo else ""
+    return f"{emoji} {d} - R$ {v:.2f}{sufixo} → {cat or 'sem categoria'}"
+
+
+def teclado_categorias(gid):
+    botoes = [InlineKeyboardButton(f"{CATEGORIAS[n]} {n}", callback_data=f"cat:{gid}:{i}") for i, n in enumerate(CAT_LISTA)]
+    return InlineKeyboardMarkup([botoes[i:i + 2] for i in range(0, len(botoes), 2)])
+
+
+async def perguntar_categoria(msg, gid, desc):
+    await msg.reply_text(f"Qual a categoria de {desc}?", reply_markup=teclado_categorias(gid))
+
+
+async def perguntar_sem_categoria(msg, lista, maximo=8):
+    for gid, d in lista[:maximo]:
+        await perguntar_categoria(msg, gid, d)
+    if len(lista) > maximo:
+        await msg.reply_text(f"Mais {len(lista) - maximo} sem categoria. Use: categoria ID (veja os IDs no botão Gastos).")
+
+
+def totais_por_categoria(g):
+    tot = {}
+    for x in g:
+        if x["tipo"] == "entrada":
+            continue
+        c = x.get("categoria") or "Sem categoria"
+        tot[c] = tot.get(c, 0) + float(x["valor"])
+    return tot
+
+
+def ordenar_categorias(tot):
+    return sorted(tot.items(), key=lambda kv: kv[1], reverse=True)
+
+
+def _msg(update):
+    return update.callback_query.message if update.callback_query else update.message
+
+
+async def enviar_longo(msg, texto, limite=3800):
+    bloco = ""
+    for linha in texto.split("\n"):
+        if len(bloco) + len(linha) + 1 > limite:
+            await msg.reply_text(bloco)
+            bloco = ""
+        bloco += linha + "\n"
+    if bloco.strip():
+        await msg.reply_text(bloco)
+
+
+def teclado_resumo(fm):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Resumido", callback_data=f"resumo_simples:{fm}"), InlineKeyboardButton("🧾 Detalhado", callback_data=f"resumo_detalhado:{fm}")],
+        [InlineKeyboardButton("🗂️ Categorias + gráfico", callback_data=f"resumo_categorias:{fm}"), InlineKeyboardButton("📈 Comparar meses", callback_data=f"resumo_comparar:{fm}")],
+    ])
+
+
+# ---------- GRÁFICOS ----------
+def _plt():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    return plt
+
+
+def grafico_pizza(dados, titulo):
+    # dados: lista de (categoria, valor), do maior para o menor
+    try:
+        plt = _plt()
+        nomes = [n for n, _ in dados]
+        valores = [v for _, v in dados]
+        total = sum(valores)
+        fig, ax = plt.subplots(figsize=(7, 8), dpi=120)
+        fatias, _ = ax.pie(
+            valores, colors=[CORES.get(n, "#9E9E9E") for n in nomes],
+            startangle=90, counterclock=False, wedgeprops=dict(width=0.42, edgecolor="white"),
+        )
+        ax.text(0, 0.06, f"R$ {total:.2f}", ha="center", va="center", fontsize=18, fontweight="bold")
+        ax.text(0, -0.12, "total", ha="center", va="center", fontsize=11, color="#666666")
+        ax.set_title(titulo, fontsize=15, pad=14)
+        legendas = [f"{n} - R$ {v:.2f} ({v / total * 100:.0f}%)" for n, v in dados]
+        ax.legend(fatias, legendas, loc="upper center", bbox_to_anchor=(0.5, 0.02), frameon=False, fontsize=11)
+        ax.set_aspect("equal")
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        buf.name = "categorias.png"
+        return buf
+    except Exception as e:
+        print(f"Erro grafico_pizza: {e}")
+        return None
+
+
+def grafico_barras(meses, totais, titulo):
+    try:
+        plt = _plt()
+        rotulos = [f"{m[5:7]}/{m[2:4]}" for m in meses]
+        maximo = max(totais) if max(totais) > 0 else 1
+        fig, ax = plt.subplots(figsize=(7, 5), dpi=120)
+        cores = ["#1565C0"] * (len(meses) - 1) + ["#F9A825"]
+        barras = ax.bar(rotulos, totais, color=cores)
+        for b, v in zip(barras, totais):
+            ax.text(b.get_x() + b.get_width() / 2, v + maximo * 0.01, f"{v:.0f}", ha="center", va="bottom", fontsize=10)
+        ax.set_ylim(0, maximo * 1.15)
+        ax.set_title(titulo, fontsize=15, pad=12)
+        ax.set_ylabel("R$")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        buf.name = "comparativo.png"
+        return buf
+    except Exception as e:
+        print(f"Erro grafico_barras: {e}")
+        return None
+
+
+async def comparativo(update, context, fim_mes=None, n=6):
+    msg = _msg(update)
+    n = max(2, min(12, n))
+    fim = fim_mes or mes_atual_str()
+    meses = lista_meses(fim, n)
+    g = gastos_entre(meses[0], meses[-1])
+    totais = {m: 0.0 for m in meses}
+    por_cat = {m: {} for m in meses}
+    for x in g:
+        if x["tipo"] == "entrada":
+            continue
+        mm = mes_de(x)
+        if mm not in totais:
+            continue
+        v = float(x["valor"])
+        totais[mm] += v
+        c = x.get("categoria") or "Sem categoria"
+        por_cat[mm][c] = por_cat[mm].get(c, 0) + v
+    if not any(totais.values()):
+        await msg.reply_text("Ainda não há gastos nesse período para comparar.")
+        return
+    t = "📈 *Comparativo de gastos*\n"
+    anterior = None
+    for m in meses:
+        v = totais[m]
+        linha = f"\n{m[5:7]}/{m[:4]}: R$ {v:.2f}"
+        if anterior:
+            linha += f" ({(v - anterior) / anterior * 100:+.0f}%)"
+        t += linha
+        anterior = v
+    if fim == mes_atual_str():
+        t += "\n\n_(o mês atual vai só até hoje)_"
+    cur, ant = meses[-1], meses[-2]
+    difs = {c: por_cat[cur].get(c, 0) - por_cat[ant].get(c, 0) for c in set(por_cat[cur]) | set(por_cat[ant])}
+    maiores = [(c, d) for c, d in sorted(difs.items(), key=lambda kv: abs(kv[1]), reverse=True)[:3] if abs(d) >= 0.01]
+    if maiores:
+        t += f"\n\n🔎 *Maiores mudanças ({ant[5:7]}/{ant[2:4]} → {cur[5:7]}/{cur[2:4]}):*"
+        for c, d in maiores:
+            t += f"\n{'⬆️' if d > 0 else '⬇️'} {CATEGORIAS.get(c, '❔')} {c}: {d:+.2f}"
+    await msg.reply_text(t, parse_mode="Markdown")
+    buf = grafico_barras(meses, [totais[m] for m in meses], "Total gasto por mês (R$)")
+    if buf:
+        await msg.reply_photo(photo=buf)
+    else:
+        await msg.reply_text("Não consegui gerar o gráfico agora.")
+
+
+async def comparar_cmd(update, context):
+    n = 6
+    for a in context.args:
+        if a.isdigit():
+            n = int(a)
+    await comparativo(update, context, n=n)
 
 
 # ---------- BACKUP ----------
@@ -251,11 +543,11 @@ def gerar_csv_bytes():
         d = supabase.table("despesas").select("*").execute().data or []
         out = io.StringIO()
         w = csv.writer(out)
-        w.writerow(["tipo", "descricao", "valor", "data/status"])
+        w.writerow(["tipo", "descricao", "valor", "data/status", "categoria"])
         for x in g:
-            w.writerow(["gasto", x["descricao"], x["valor"], x.get("data", "") or x.get("created_at", "")])
+            w.writerow(["gasto", x["descricao"], x["valor"], x.get("data", "") or x.get("created_at", ""), x.get("categoria") or ""])
         for x in d:
-            w.writerow(["despesa", x["descricao"], x["valor"], x["status"]])
+            w.writerow(["despesa", x["descricao"], x["valor"], x["status"], ""])
         return out.getvalue().encode("utf-8-sig")
     except Exception as e:
         print(f"Erro gerar_csv: {e}")
@@ -274,7 +566,7 @@ async def enviar_backup(update, legenda="Backup automático antes de apagar"):
 
 
 # ---------- TELAS ----------
-async def resumo(update, context, filtro_mes=None, detalhado=False):
+async def resumo(update, context, filtro_mes=None, detalhado=False, categorias=False):
     if not filtro_mes:
         filtro_mes = mes_atual_str()
     atual = filtro_mes == mes_atual_str()
@@ -307,10 +599,20 @@ async def resumo(update, context, filtro_mes=None, detalhado=False):
         t += "\n\n🧾 *Detalhes:*"
         for i, (nome, valor) in enumerate(ordenado, start=1):
             t += f"\n{i}. {escape_md(nome)} - R$ {valor:.2f}"
-    if update.callback_query:
-        await update.callback_query.message.reply_text(t, parse_mode="Markdown")
-    else:
-        await update.message.reply_text(t, parse_mode="Markdown")
+    tot_cat = totais_por_categoria(g)
+    if categorias and tot_cat:
+        total_c = sum(tot_cat.values())
+        t += "\n\n🗂️ *Por categoria:*"
+        for nome, valor in ordenar_categorias(tot_cat):
+            t += f"\n{CATEGORIAS.get(nome, '❔')} {nome} - R$ {valor:.2f} ({valor / total_c * 100:.0f}%)"
+    msg = _msg(update)
+    await msg.reply_text(t, parse_mode="Markdown")
+    if categorias and tot_cat:
+        buf = grafico_pizza(ordenar_categorias(tot_cat), f"Gastos por categoria - {filtro_mes[5:7]}/{filtro_mes[:4]}")
+        if buf:
+            await msg.reply_photo(photo=buf)
+        else:
+            await msg.reply_text("Não consegui gerar o gráfico agora.")
 
 
 def menu():
@@ -319,7 +621,7 @@ def menu():
         [InlineKeyboardButton("💳 Cartão", callback_data="gasto_cartao"), InlineKeyboardButton("🍽️ SODEXO", callback_data="gasto_sodexo")],
         [InlineKeyboardButton("📋 Gastos", callback_data="listar_gastos"), InlineKeyboardButton("🧾 Despesas", callback_data="listar_despesas")],
         [InlineKeyboardButton("✅ Pagar", callback_data="pagar_despesa"), InlineKeyboardButton("🗑️ Apagar último", callback_data="apagar_ultimo")],
-        [InlineKeyboardButton("🔄 Zerar mês", callback_data="zerar_mes")],
+        [InlineKeyboardButton("📈 Resumos e gráficos", callback_data="menu_resumo"), InlineKeyboardButton("🔄 Zerar mês", callback_data="zerar_mes")],
     ]
     return InlineKeyboardMarkup(kb)
 
@@ -407,12 +709,35 @@ async def apagar_tudo():
 async def on_button(update, context):
     q = update.callback_query
     await q.answer()
+    if q.data.startswith("cat:"):
+        try:
+            _, gid, i = q.data.split(":")
+            gid = int(gid)
+            nome = CAT_LISTA[int(i)]
+            r = supabase.table("gastos").select("*").eq("id", gid).execute().data
+            if not r:
+                await q.edit_message_text("Esse gasto não existe mais.")
+                return
+            gasto = r[0]
+            supabase.table("gastos").update({"categoria": nome}).eq("id", gid).execute()
+            aprender(gasto["descricao"], nome)
+            await q.edit_message_text(f"✅ {gasto['descricao']} → {CATEGORIAS[nome]} {nome}")
+        except Exception as e:
+            print(f"Erro ao salvar categoria: {e}")
+            await q.message.reply_text("Não consegui salvar a categoria. Confira se a coluna 'categoria' foi criada no Supabase.")
+        return
+    if q.data == "menu_resumo":
+        fm = mes_atual_str()
+        await q.message.reply_text(f"Resumo de {fm[5:7]}/{fm[:4]} - quer como?", reply_markup=teclado_resumo(fm))
+        return
     if q.data.startswith("resumo_"):
         partes = q.data.split(":")
         tipo = partes[0]
         fm = partes[1] if len(partes) > 1 else None
-        detalhado = (tipo == "resumo_detalhado")
-        await resumo(update, context, filtro_mes=fm, detalhado=detalhado)
+        if tipo == "resumo_comparar":
+            await comparativo(update, context, fim_mes=fm)
+        else:
+            await resumo(update, context, filtro_mes=fm, detalhado=(tipo == "resumo_detalhado"), categorias=(tipo == "resumo_categorias"))
         return
     if q.data == "saldo":
         context.user_data["esperando"] = "saldo"
@@ -422,8 +747,8 @@ async def on_button(update, context):
         await q.message.reply_text("Envie um por linha. Ex:\nAlmoço, 35\nPode ser com ou sem vírgula.")
     elif q.data == "listar_gastos":
         g = gastos_do_mes(mes_atual_str())
-        t = "Nenhum gasto nesse mês." if not g else "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f} - {x['tipo']}" for x in g])
-        await q.message.reply_text(t + "\n\nPra editar, manda: editar 3 45,90\nPra apagar um, manda: apagar 3\nPra apagar despesa, manda: apagar despesa 3\nPra apagar entrada, manda: apagar entrada 3000")
+        t = "Nenhum gasto nesse mês." if not g else "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f} - {x['tipo']}" + (f" - {x['categoria']}" if x.get("categoria") else "") for x in g])
+        await enviar_longo(q.message, t + "\n\nPra editar, manda: editar 3 45,90\nPra mudar a categoria, manda: categoria 3\nPra apagar um, manda: apagar 3\nPra apagar despesa, manda: apagar despesa 3\nPra apagar entrada, manda: apagar entrada 3000")
     elif q.data == "listar_despesas":
         d = supabase.table("despesas").select("*").order("id").execute().data or []
         t = "Nenhuma despesa." if not d else "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f} - {x['status']}" for x in d])
@@ -541,7 +866,7 @@ async def tratar_texto(update, context, o):
     if esp and esp.startswith("gasto_"):
         tipo = esp.replace("gasto_", "")
         tot = 0
-        ok = 0
+        recibo, sem_cat = [], []
         for linha in o.split("\n"):
             linha = linha.strip()
             if not linha:
@@ -550,14 +875,17 @@ async def tratar_texto(update, context, o):
             if r is None:
                 continue
             d, v = r
-            supabase.table("gastos").insert({"descricao": d, "valor": v, "tipo": tipo}).execute()
+            gid, cat = salvar_gasto(d, v, tipo)
             tot += v
-            ok += 1
+            recibo.append(linha_recibo(d, v, cat))
+            if not cat and gid:
+                sem_cat.append((gid, d))
             if tipo == "dinheiro":
                 set_saldo(get_saldo() - v)
         context.user_data.clear()
-        await update.message.reply_text(f"Registrado: {ok} item(ns) - R$ {tot:.2f}")
+        await update.message.reply_text(f"Registrado: {len(recibo)} item(ns) - R$ {tot:.2f}\n" + "\n".join(recibo))
         await resumo(update, context)
+        await perguntar_sem_categoria(update.message, sem_cat)
         return
 
     if esp == "pagar":
@@ -601,6 +929,24 @@ async def tratar_texto(update, context, o):
 
     if tx.startswith("editar"):
         await editar_item(update, context, o)
+        return
+
+    if tx.startswith("categoria"):
+        m = re.search(r"(\d+)", o)
+        if not m:
+            await update.message.reply_text("Use: categoria 12 (veja o ID no botão Gastos)")
+            return
+        gid = int(m.group(1))
+        r = supabase.table("gastos").select("*").eq("id", gid).execute().data
+        if not r:
+            await update.message.reply_text("Não achei esse gasto.")
+            return
+        await perguntar_categoria(update.message, gid, r[0]["descricao"])
+        return
+
+    if tx.startswith("comparar"):
+        m = re.search(r"(\d+)", o)
+        await comparativo(update, context, n=int(m.group(1)) if m else 6)
         return
 
     if tx.startswith("apagar tudo") or tx == "apagar_tudo":
@@ -674,7 +1020,7 @@ async def tratar_texto(update, context, o):
 
     if tx.startswith("resumo"):
         fm = parse_mes(o) or mes_atual_str()
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📋 Resumido", callback_data=f"resumo_simples:{fm}"), InlineKeyboardButton("🧾 Detalhado", callback_data=f"resumo_detalhado:{fm}")]])
+        kb = teclado_resumo(fm)
         await update.message.reply_text(f"Resumo de {fm[5:7]}/{fm[:4]} - quer como?", reply_markup=kb)
         return
 
@@ -707,8 +1053,8 @@ async def tratar_texto(update, context, o):
         return
 
     if tx.startswith(("saida", "saída", "gasto", "gastei", "paguei")):
-        ok = 0
         tot = 0
+        recibo, sem_cat = [], []
         for linha in [l.strip() for l in o.split("\n") if l.strip()]:
             t_linha = detectar_tipo(linha)
             ll = limpar_pagamento(linha)
@@ -716,16 +1062,19 @@ async def tratar_texto(update, context, o):
             if r is None:
                 continue
             d, v = r
-            supabase.table("gastos").insert({"descricao": d, "valor": v, "tipo": t_linha}).execute()
+            gid, cat = salvar_gasto(d, v, t_linha)
             if t_linha == "dinheiro":
                 set_saldo(get_saldo() - v)
-            ok += 1
             tot += v
-        if ok == 0:
+            recibo.append(linha_recibo(d, v, cat, t_linha))
+            if not cat and gid:
+                sem_cat.append((gid, d))
+        if not recibo:
             await update.message.reply_text("Ex: saida mercado 50")
             return
-        await update.message.reply_text(f"✅ {ok} saída(s) lançada(s) - R$ {tot:.2f}")
+        await update.message.reply_text(f"✅ {len(recibo)} saída(s) lançada(s) - R$ {tot:.2f}\n" + "\n".join(recibo))
         await resumo(update, context)
+        await perguntar_sem_categoria(update.message, sem_cat)
         return
 
     # Texto solto com um valor: vira saída
@@ -733,14 +1082,16 @@ async def tratar_texto(update, context, o):
     r = parse_linha(limpar_pagamento(o))
     if r is not None:
         d, v = r
-        supabase.table("gastos").insert({"descricao": d, "valor": v, "tipo": tipo}).execute()
+        gid, cat = salvar_gasto(d, v, tipo)
         if tipo == "dinheiro":
             set_saldo(get_saldo() - v)
-        await update.message.reply_text(f"✅ Saída: {d} - R$ {v:.2f} ({tipo})")
+        await update.message.reply_text("✅ Saída: " + linha_recibo(d, v, cat, tipo))
         await resumo(update, context)
+        if not cat and gid:
+            await perguntar_categoria(update.message, gid, d)
         return
 
-    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nzerar setembro\napagar ultimo\napagar despesa 3\napagar entrada 3000\neditar 12 45,90")
+    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nzerar setembro\napagar ultimo\napagar despesa 3\napagar entrada 3000\neditar 12 45,90\ncategoria 12\ncomparar")
 
 
 # ---------- EDITAR ----------
@@ -850,8 +1201,7 @@ async def resumo_cmd(update, context):
     txt = " ".join(context.args)
     fm = parse_mes(txt) if txt else mes_atual_str()
     fm = fm or mes_atual_str()
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("📋 Resumido", callback_data=f"resumo_simples:{fm}"), InlineKeyboardButton("🧾 Detalhado", callback_data=f"resumo_detalhado:{fm}")]])
-    await update.message.reply_text(f"Resumo de {fm[5:7]}/{fm[:4]} - quer como?", reply_markup=kb)
+    await update.message.reply_text(f"Resumo de {fm[5:7]}/{fm[:4]} - quer como?", reply_markup=teclado_resumo(fm))
 
 
 async def apagar_tudo_cmd(update, context):
@@ -878,6 +1228,7 @@ def main():
     app.add_handler(CommandHandler("exportar", exportar_cmd))
     app.add_handler(CommandHandler("zerar_mes", zerar_mes_cmd))
     app.add_handler(CommandHandler("resumo", resumo_cmd))
+    app.add_handler(CommandHandler("comparar", comparar_cmd))
     app.add_handler(CommandHandler("editar", editar_cmd))
     app.add_handler(CommandHandler("apagar_tudo", apagar_tudo_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
