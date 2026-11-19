@@ -290,11 +290,12 @@ def extrai_data(txt):
 
 
 _COLS_DATA = None
+_DATA_E_DATE = False  # True quando a coluna "data" é do tipo date (guarda só AAAA-MM-DD)
 
 
 def colunas_data():
     # Descobre qual coluna de data a tabela gastos tem: data e/ou created_at
-    global _COLS_DATA
+    global _COLS_DATA, _DATA_E_DATE
     if _COLS_DATA:
         return _COLS_DATA
     try:
@@ -303,6 +304,9 @@ def colunas_data():
             cols = [c for c in ("data", "created_at") if c in r[0]]
             if cols:
                 _COLS_DATA = cols
+                if "data" in cols:
+                    # Valor com 10 caracteres (AAAA-MM-DD) = coluna do tipo date. Com hora, ou vazio, usa o timestamp (serve nos dois tipos)
+                    _DATA_E_DATE = len(str(r[0].get("data") or "")) == 10
                 return cols
     except Exception as e:
         print(f"Erro ao descobrir a coluna de data: {e}")
@@ -315,13 +319,16 @@ def tentar_com_data(dados, dt, executar):
     if not dt:
         return executar(dados)
     iso = iso_data(dt)
+    data_so = dt.strftime("%Y-%m-%d")
     opcoes, ultimo = [], None
     for cols in (colunas_data(), ["data"], ["created_at"], ["data", "created_at"]):
         if cols not in opcoes:
             opcoes.append(cols)
     for cols in opcoes:
         try:
-            r = executar({**dados, **{c: iso for c in cols}})
+            # Coluna "data" do tipo date recebe só o dia; as demais recebem o timestamp completo
+            valores = {c: (data_so if (c == "data" and _DATA_E_DATE) else iso) for c in cols}
+            r = executar({**dados, **valores})
             _COLS_DATA = cols
             return r
         except Exception as e:
