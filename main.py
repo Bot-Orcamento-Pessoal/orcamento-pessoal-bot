@@ -27,13 +27,13 @@ NUM_RE = r"(?:R\$\s*)?(\d[\d.,]*)"
 CATEGORIAS = {
     "Mercado": "🛒", "Alimentação": "🍽️", "Combustível": "⛽", "Manutenção": "🔧",
     "Transporte": "🚌", "Saúde": "💊", "Lazer": "🎉", "Compras": "👕",
-    "Casa": "🏠", "Educação": "📚", "Outros": "📦",
+    "Casa": "🏠", "Educação": "📚", "Viagem": "✈️", "Outros": "📦",
 }
 CAT_LISTA = list(CATEGORIAS.keys())
 CORES = {
     "Mercado": "#2E7D32", "Alimentação": "#F9A825", "Combustível": "#EF6C00", "Manutenção": "#6D4C41",
     "Transporte": "#1565C0", "Saúde": "#C62828", "Lazer": "#8E24AA", "Compras": "#EC407A",
-    "Casa": "#00897B", "Educação": "#3949AB", "Outros": "#757575", "Sem categoria": "#BDBDBD",
+    "Casa": "#00897B", "Educação": "#3949AB", "Viagem": "#00ACC1", "Outros": "#757575", "Sem categoria": "#BDBDBD",
 }
 # Palavras que classificam sozinhas (sem acento/maiúscula; plural é aceito automaticamente)
 PALAVRAS_CATEGORIA = {
@@ -43,10 +43,11 @@ PALAVRAS_CATEGORIA = {
     "Manutenção": ["manutencao", "oficina", "mecanico", "oleo", "pneu", "revisao", "peca", "alinhamento", "balanceamento", "bateria", "freio", "conserto"],
     "Transporte": ["uber", "99", "onibus", "passagem", "pedagio", "estacionamento", "metro", "taxi", "bilhete"],
     "Saúde": ["farmacia", "remedio", "consulta", "exame", "dentista", "medico", "hospital"],
-    "Lazer": ["cinema", "bar", "viagem", "passeio", "show", "festa", "jogo", "netflix", "spotify", "ingresso", "balada"],
+    "Lazer": ["cinema", "bar", "passeio", "show", "festa", "jogo", "netflix", "spotify", "ingresso", "balada"],
     "Compras": ["roupa", "sapato", "tenis", "shopping", "camisa", "calca", "bermuda", "bolsa", "loja"],
     "Casa": ["gas", "botijao", "reforma", "limpeza", "movel", "moveis", "lampada", "ferramenta", "tinta"],
     "Educação": ["curso", "escola", "faculdade", "livro", "matricula", "apostila"],
+    "Viagem": ["viagem", "hotel", "hospedagem", "pousada", "airbnb", "hostel", "excursao", "pacote"],
 }
 
 # ---------- SEGURANÇA: só os IDs liberados ----------
@@ -288,21 +289,94 @@ def extrai_data(txt):
     return resto, d
 
 
+_COLS_DATA = None
+
+
+def colunas_data():
+    # Descobre qual coluna de data a tabela gastos tem: data e/ou created_at
+    global _COLS_DATA
+    if _COLS_DATA:
+        return _COLS_DATA
+    try:
+        r = supabase.table("gastos").select("*").limit(1).execute().data or []
+        if r:
+            cols = [c for c in ("data", "created_at") if c in r[0]]
+            if cols:
+                _COLS_DATA = cols
+                return cols
+    except Exception as e:
+        print(f"Erro ao descobrir a coluna de data: {e}")
+    return ["created_at"]
+
+
+def tentar_com_data(dados, dt, executar):
+    # Executa (insert/update) gravando a data na coluna certa; se a primeira tentativa falhar, tenta as outras
+    global _COLS_DATA
+    if not dt:
+        return executar(dados)
+    iso = iso_data(dt)
+    opcoes, ultimo = [], None
+    for cols in (colunas_data(), ["data"], ["created_at"], ["data", "created_at"]):
+        if cols not in opcoes:
+            opcoes.append(cols)
+    for cols in opcoes:
+        try:
+            r = executar({**dados, **{c: iso for c in cols}})
+            _COLS_DATA = cols
+            return r
+        except Exception as e:
+            print(f"Erro ao gravar a data em {cols}: {e}")
+            ultimo = e
+    raise ultimo
+
+
 def iso_data(d):
     # Meio-dia em São Paulo, pra a data não escorregar de dia por causa do fuso
     dt = datetime.datetime(d.year, d.month, d.day, 12, 0, tzinfo=TZ)
     return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+TAG_RE = re.compile(r"(?<!\w)#(\w+)")
+
+
+def extrai_categoria(txt):
+    # Tira a #categoria do texto. Devolve (texto sem a tag, nome da categoria | None se não tem | False se não existe)
+    m = TAG_RE.search(txt)
+    if not m:
+        return txt, None
+    resto = txt[:m.start()] + " " + txt[m.end():]
+    tag = normalizar(m.group(1))
+    nomes = {normalizar(n): n for n in CATEGORIAS}
+    if tag in nomes:
+        return resto, nomes[tag]
+    cand = [n for k, n in nomes.items() if len(tag) >= 3 and k.startswith(tag)]
+    if len(cand) == 1:
+        return resto, cand[0]
+    return resto, False
+
+
+def explica_falha(linha):
+    _, dt = extrai_data(linha)
+    if dt is False:
+        return "data inválida"
+    _, cat = extrai_categoria(linha)
+    if cat is False:
+        return "categoria desconhecida, use por exemplo #mercado ou #viagem"
+    return "faltou o valor"
+
+
 def parse_linha_data(linha, rem=""):
-    # Como parse_linha, mas entende a data. Devolve (descrição, valor, data|None) ou None
+    # Como parse_linha, mas entende a data e a #categoria. Devolve (descrição, valor, data|None, categoria|None) ou None
     limpo, dt = extrai_data(linha)
     if dt is False:
+        return None
+    limpo, cat = extrai_categoria(limpo)
+    if cat is False:
         return None
     r = parse_linha(limpo, rem)
     if r is None:
         return None
-    return r[0], r[1], dt
+    return r[0], r[1], dt, cat
 
 
 def processar_despesas(texto):
@@ -336,8 +410,8 @@ def gastos_entre(mes_ini, mes_fim):
         f = "%Y-%m-%dT%H:%M:%SZ"
         r = (
             supabase.table("gastos").select("*")
-            .gte("created_at", ini.astimezone(datetime.timezone.utc).strftime(f))
-            .lt("created_at", fim.astimezone(datetime.timezone.utc).strftime(f))
+            .gte(colunas_data()[0], ini.astimezone(datetime.timezone.utc).strftime(f))
+            .lt(colunas_data()[0], fim.astimezone(datetime.timezone.utc).strftime(f))
             .order("id")
             .execute().data or []
         )
@@ -417,23 +491,25 @@ def detectar_categoria(desc):
     return None
 
 
-def salvar_gasto(desc, valor, tipo, data=None):
-    # Salva o gasto já com a categoria (se reconhecida). Devolve (id, categoria)
-    cat = detectar_categoria(desc)
+def salvar_gasto(desc, valor, tipo, data=None, forcada=None):
+    # Salva o gasto já com a categoria (a #escolhida ou a reconhecida). Devolve (id, categoria)
+    cat = forcada or detectar_categoria(desc)
     dados = {"descricao": desc, "valor": valor, "tipo": tipo}
-    if data:
-        dados["created_at"] = iso_data(data)
     if cat:
         dados["categoria"] = cat
+
+    def inserir(d):
+        return supabase.table("gastos").insert(d).execute()
+
     try:
-        r = supabase.table("gastos").insert(dados).execute()
+        r = tentar_com_data(dados, data, inserir)
     except Exception as e:
         if "categoria" not in dados:
             raise
         print(f"Erro ao salvar com categoria (a coluna existe?): {e}")
         dados.pop("categoria")
         cat = None
-        r = supabase.table("gastos").insert(dados).execute()
+        r = tentar_com_data(dados, data, inserir)
     gid = r.data[0]["id"] if r.data else None
     return gid, cat
 
@@ -916,7 +992,7 @@ async def on_button(update, context):
         await q.message.reply_text("Envie o saldo. Ex: 3500")
     elif q.data.startswith("gasto_"):
         context.user_data["esperando"] = q.data
-        await q.message.reply_text("Envie um por linha. Ex:\nAlmoço, 35\nPode ser com ou sem vírgula.\nPra outra data: Almoço 35 ontem ou Almoço 35 15/11")
+        await q.message.reply_text("Envie um por linha. Ex:\nAlmoço, 35\nPode ser com ou sem vírgula.\nPra outra data: Almoço 35 ontem ou Almoço 35 15/11\nPra escolher a categoria: Almoço 35 #viagem")
     elif q.data == "listar_gastos":
         g = gastos_do_mes(mes_atual_str())
         t = "Nenhum gasto nesse mês." if not g else "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f} - {x['tipo']}" + (f" - {x['categoria']}" if x.get("categoria") else "") for x in g])
@@ -1038,16 +1114,17 @@ async def tratar_texto(update, context, o):
     if esp and esp.startswith("gasto_"):
         tipo = esp.replace("gasto_", "")
         tot = 0
-        recibo, sem_cat = [], []
+        recibo, sem_cat, falhas = [], [], []
         for linha in o.split("\n"):
             linha = linha.strip()
             if not linha:
                 continue
             r = parse_linha_data(linha)
             if r is None:
+                falhas.append(f"• {linha} ({explica_falha(linha)})")
                 continue
-            d, v, dt = r
-            gid, cat = salvar_gasto(d, v, tipo, dt)
+            d, v, dt, fc = r
+            gid, cat = salvar_gasto(d, v, tipo, dt, fc)
             tot += v
             recibo.append(linha_recibo(d, v, cat, data=dt))
             if not cat and gid:
@@ -1055,7 +1132,10 @@ async def tratar_texto(update, context, o):
             if tipo == "dinheiro":
                 set_saldo(get_saldo() - v)
         context.user_data.clear()
-        await update.message.reply_text(f"Registrado: {len(recibo)} item(ns) - R$ {tot:.2f}\n" + "\n".join(recibo))
+        texto = f"Registrado: {len(recibo)} item(ns) - R$ {tot:.2f}\n" + "\n".join(recibo)
+        if falhas:
+            texto += "\n\n⚠️ Não registrei:\n" + "\n".join(falhas)
+        await update.message.reply_text(texto)
         await resumo(update, context)
         await perguntar_sem_categoria(update.message, sem_cat)
         return
@@ -1211,37 +1291,46 @@ async def tratar_texto(update, context, o):
     if tx.startswith(("entrada", "recebi", "salario", "salário")):
         ok = 0
         tot = 0
+        falhas = []
         for linha in [l.strip() for l in o.split("\n") if l.strip()]:
             ll = limpar_pagamento(linha)
             r = parse_linha_data(ll, r"^\s*(entrada|recebi)\b")
             if r is None:
+                falhas.append(f"• {linha} ({explica_falha(linha)})")
                 continue
-            d, v, dt = r
-            set_saldo(get_saldo() + v)
+            d, v, dt, _fc = r
             dados_ent = {"descricao": d, "valor": v, "tipo": "entrada"}
-            if dt:
-                dados_ent["created_at"] = iso_data(dt)
-            supabase.table("gastos").insert(dados_ent).execute()
+            try:
+                tentar_com_data(dados_ent, dt, lambda x: supabase.table("gastos").insert(x).execute())
+            except Exception as e:
+                print(f"Erro ao salvar entrada: {e}")
+                falhas.append(f"• {linha} (erro ao salvar)")
+                continue
+            set_saldo(get_saldo() + v)
             ok += 1
             tot += v
         if ok == 0:
-            await update.message.reply_text("Ex: entrada salario 3000")
+            await update.message.reply_text(("⚠️ Não registrei:\n" + "\n".join(falhas)) if falhas else "Ex: entrada salario 3000")
             return
-        await update.message.reply_text(f"✅ {ok} entrada(s) lançada(s) - R$ {tot:.2f}")
+        texto = f"✅ {ok} entrada(s) lançada(s) - R$ {tot:.2f}"
+        if falhas:
+            texto += "\n\n⚠️ Não registrei:\n" + "\n".join(falhas)
+        await update.message.reply_text(texto)
         await resumo(update, context)
         return
 
     if tx.startswith(("saida", "saída", "gasto", "gastei", "paguei")):
         tot = 0
-        recibo, sem_cat = [], []
+        recibo, sem_cat, falhas = [], [], []
         for linha in [l.strip() for l in o.split("\n") if l.strip()]:
             t_linha = detectar_tipo(linha)
             ll = limpar_pagamento(linha)
             r = parse_linha_data(ll, r"^\s*(saida|saída|gastos?|gastei|paguei)\b")
             if r is None:
+                falhas.append(f"• {linha} ({explica_falha(linha)})")
                 continue
-            d, v, dt = r
-            gid, cat = salvar_gasto(d, v, t_linha, dt)
+            d, v, dt, fc = r
+            gid, cat = salvar_gasto(d, v, t_linha, dt, fc)
             if t_linha == "dinheiro":
                 set_saldo(get_saldo() - v)
             tot += v
@@ -1249,9 +1338,12 @@ async def tratar_texto(update, context, o):
             if not cat and gid:
                 sem_cat.append((gid, d))
         if not recibo:
-            await update.message.reply_text("Ex: saida mercado 50")
+            await update.message.reply_text(("⚠️ Não registrei:\n" + "\n".join(falhas)) if falhas else "Ex: saida mercado 50")
             return
-        await update.message.reply_text(f"✅ {len(recibo)} saída(s) lançada(s) - R$ {tot:.2f}\n" + "\n".join(recibo))
+        texto = f"✅ {len(recibo)} saída(s) lançada(s) - R$ {tot:.2f}\n" + "\n".join(recibo)
+        if falhas:
+            texto += "\n\n⚠️ Não registrei:\n" + "\n".join(falhas)
+        await update.message.reply_text(texto)
         await resumo(update, context)
         await perguntar_sem_categoria(update.message, sem_cat)
         return
@@ -1260,8 +1352,8 @@ async def tratar_texto(update, context, o):
     tipo = detectar_tipo(o)
     r = parse_linha_data(limpar_pagamento(o))
     if r is not None:
-        d, v, dt = r
-        gid, cat = salvar_gasto(d, v, tipo, dt)
+        d, v, dt, fc = r
+        gid, cat = salvar_gasto(d, v, tipo, dt, fc)
         if tipo == "dinheiro":
             set_saldo(get_saldo() - v)
         await update.message.reply_text("✅ Saída: " + linha_recibo(d, v, cat, tipo, dt))
@@ -1270,12 +1362,17 @@ async def tratar_texto(update, context, o):
             await perguntar_categoria(update.message, gid, d)
         return
 
-    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nzerar setembro\napagar ultimo\napagar despesa 3\napagar entrada 3000\neditar 12 45,90\ncategoria 12\ncomparar\nmercado 50 ontem\nmercado 50 15/11\nbuscar mercado")
+    motivo = explica_falha(o)
+    if motivo != "faltou o valor":
+        await update.message.reply_text(f"⚠️ Não registrei: {motivo}.")
+        return
+
+    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nzerar setembro\napagar ultimo\napagar despesa 3\napagar entrada 3000\neditar 12 45,90\ncategoria 12\ncomparar\nmercado 50 ontem\nmercado 50 15/11\nalmoço 35 #viagem\nbuscar mercado")
 
 
 # ---------- EDITAR ----------
 async def editar_item(update, context, o):
-    ajuda = "Use:\neditar 12 45,90\neditar 12 45,90 Mercado\neditar 12 Mercado\neditar 12 ontem\neditar 12 15/11\neditar despesa 3 187,40"
+    ajuda = "Use:\neditar 12 45,90\neditar 12 45,90 Mercado\neditar 12 Mercado\neditar 12 ontem\neditar 12 15/11\neditar 12 #viagem\neditar despesa 3 187,40"
     m = re.match(r"^\s*editar\s+(despesa\s+)?(\d+)\s*(.*)$", o, flags=re.IGNORECASE | re.DOTALL)
     if not m:
         await update.message.reply_text(ajuda)
@@ -1293,6 +1390,14 @@ async def editar_item(update, context, o):
         return
     if dt and eh_despesa:
         await update.message.reply_text("Despesas não têm data. Pra gastos: editar 12 15/11")
+        return
+    resto, cat = extrai_categoria(resto)
+    resto = resto.strip()
+    if cat is False:
+        await update.message.reply_text("Categoria desconhecida. Use por exemplo: editar 12 #viagem")
+        return
+    if cat and eh_despesa:
+        await update.message.reply_text("Despesas não têm categoria.")
         return
 
     v = None
@@ -1313,7 +1418,7 @@ async def editar_item(update, context, o):
         desc = resto
     desc = re.sub(r"\s+", " ", desc).strip(" ,-")
     nova_desc = desc.title() if desc else None
-    if v is None and not nova_desc and not dt:
+    if v is None and not nova_desc and not dt and not cat:
         await update.message.reply_text("Não entendi o novo valor.\n" + ajuda)
         return
 
@@ -1337,16 +1442,16 @@ async def editar_item(update, context, o):
         elif item["tipo"] == "entrada":
             ajuste = nv - ov
         upd = {"valor": nv, "descricao": nd}
-        if dt:
-            upd["created_at"] = iso_data(dt)
-        supabase.table(tabela).update(upd).eq("id", iid).execute()
+        if cat:
+            upd["categoria"] = cat
+        tentar_com_data(upd, dt, lambda x: supabase.table(tabela).update(x).eq("id", iid).execute())
         if ajuste:
             set_saldo(get_saldo() + ajuste)
     except Exception as e:
         print(f"Erro editar: {e}")
         await update.message.reply_text("Não consegui editar. Tenta de novo.")
         return
-    msg = f"✏️ {nome} {iid} atualizado: {nd} - R$ {nv:.2f}" + (f" 📅 {dt.strftime('%d/%m')}" if dt else "")
+    msg = f"✏️ {nome} {iid} atualizado: {nd} - R$ {nv:.2f}" + (f" 📅 {dt.strftime('%d/%m')}" if dt else "") + (f" {CATEGORIAS.get(cat, '❔')} {cat}" if cat else "")
     if ajuste:
         msg += f"\nSaldo ajustado em R$ {ajuste:+.2f}"
     await update.message.reply_text(msg)
