@@ -1038,6 +1038,40 @@ async def on_button(update, context):
     await resumo(update, context)
 
 
+def linhas_de(texto):
+    # Separa em lançamentos: uma linha por item, ou itens separados por ;
+    return [l.strip() for l in re.split(r"[\n;]", texto) if l.strip()]
+
+
+async def lancar_saidas(update, linhas):
+    tot = 0
+    recibo, sem_cat, falhas = [], [], []
+    for linha in linhas:
+        t_linha = detectar_tipo(linha)
+        ll = limpar_pagamento(linha)
+        r = parse_linha_data(ll, r"^\s*(saida|saída|gastos?|gastei|paguei)\b")
+        if r is None:
+            falhas.append(f"• {linha} ({explica_falha(linha)})")
+            continue
+        d, v, dt, fc = r
+        gid, cat = salvar_gasto(d, v, t_linha, dt, fc)
+        if t_linha == "dinheiro":
+            set_saldo(get_saldo() - v)
+        tot += v
+        recibo.append(linha_recibo(d, v, cat, t_linha, dt))
+        if not cat and gid:
+            sem_cat.append((gid, d))
+    if not recibo:
+        await update.message.reply_text(("⚠️ Não registrei:\n" + "\n".join(falhas)) if falhas else "Ex: saida mercado 50")
+        return
+    texto = f"✅ {len(recibo)} saída(s) lançada(s) - R$ {tot:.2f}\n" + "\n".join(recibo)
+    if falhas:
+        texto += "\n\n⚠️ Não registrei:\n" + "\n".join(falhas)
+    await update.message.reply_text(texto)
+    await resumo(update, context=None)
+    await perguntar_sem_categoria(update.message, sem_cat)
+
+
 # ---------- TEXTO ----------
 async def on_text(update, context):
     await tratar_texto(update, context, update.message.text.strip())
@@ -1122,10 +1156,7 @@ async def tratar_texto(update, context, o):
         tipo = esp.replace("gasto_", "")
         tot = 0
         recibo, sem_cat, falhas = [], [], []
-        for linha in o.split("\n"):
-            linha = linha.strip()
-            if not linha:
-                continue
+        for linha in linhas_de(o):
             r = parse_linha_data(linha)
             if r is None:
                 falhas.append(f"• {linha} ({explica_falha(linha)})")
@@ -1299,7 +1330,7 @@ async def tratar_texto(update, context, o):
         ok = 0
         tot = 0
         falhas = []
-        for linha in [l.strip() for l in o.split("\n") if l.strip()]:
+        for linha in linhas_de(o):
             ll = limpar_pagamento(linha)
             r = parse_linha_data(ll, r"^\s*(entrada|recebi)\b")
             if r is None:
@@ -1327,32 +1358,13 @@ async def tratar_texto(update, context, o):
         return
 
     if tx.startswith(("saida", "saída", "gasto", "gastei", "paguei")):
-        tot = 0
-        recibo, sem_cat, falhas = [], [], []
-        for linha in [l.strip() for l in o.split("\n") if l.strip()]:
-            t_linha = detectar_tipo(linha)
-            ll = limpar_pagamento(linha)
-            r = parse_linha_data(ll, r"^\s*(saida|saída|gastos?|gastei|paguei)\b")
-            if r is None:
-                falhas.append(f"• {linha} ({explica_falha(linha)})")
-                continue
-            d, v, dt, fc = r
-            gid, cat = salvar_gasto(d, v, t_linha, dt, fc)
-            if t_linha == "dinheiro":
-                set_saldo(get_saldo() - v)
-            tot += v
-            recibo.append(linha_recibo(d, v, cat, t_linha, dt))
-            if not cat and gid:
-                sem_cat.append((gid, d))
-        if not recibo:
-            await update.message.reply_text(("⚠️ Não registrei:\n" + "\n".join(falhas)) if falhas else "Ex: saida mercado 50")
-            return
-        texto = f"✅ {len(recibo)} saída(s) lançada(s) - R$ {tot:.2f}\n" + "\n".join(recibo)
-        if falhas:
-            texto += "\n\n⚠️ Não registrei:\n" + "\n".join(falhas)
-        await update.message.reply_text(texto)
-        await resumo(update, context)
-        await perguntar_sem_categoria(update.message, sem_cat)
+        await lancar_saidas(update, linhas_de(o))
+        return
+
+    # Várias linhas sem prefixo (ex.: "mercado 50" e "almoço 35"): cada linha vira uma saída
+    linhas_solto = linhas_de(o)
+    if len(linhas_solto) > 1 and any(parse_linha_data(limpar_pagamento(l)) for l in linhas_solto):
+        await lancar_saidas(update, linhas_solto)
         return
 
     # Texto solto com um valor: vira saída
