@@ -6,7 +6,6 @@ from telegram.ext import (
     ContextTypes, filters, TypeHandler, ApplicationHandlerStop,
 )
 from supabase import create_client
-from aiohttp import web
 
 TOKEN = os.environ["BOT_TOKEN"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -59,22 +58,27 @@ for _x in _raw.replace(";", ",").split(","):
     if _x.isdigit():
         ALLOWED_IDS.add(int(_x))
 
+
 async def so_permitidos(update, context):
     # Fechado por padrão: se o ID não estiver na lista (ou a lista estiver vazia), ignora.
     uid = update.effective_user.id if update.effective_user else None
     if uid not in ALLOWED_IDS:
         raise ApplicationHandlerStop
 
+
 def escape_md(s):
     # Markdown simples do Telegram: só _ * ` [ precisam de barra
     return re.sub(r"([_*`\[])", r"\\\1", str(s))
+
 
 # ---------- DATAS ----------
 def hoje_sp():
     return datetime.datetime.now(TZ).date()
 
+
 def mes_atual_str():
     return hoje_sp().strftime("%Y-%m")
+
 
 def mes_anterior_str():
     h = hoje_sp()
@@ -84,6 +88,7 @@ def mes_anterior_str():
         mes = 12
         ano -= 1
     return f"{ano}-{mes:02d}"
+
 
 def mes_de(g):
     raw = str(g.get("data") or g.get("created_at") or "")
@@ -101,6 +106,7 @@ def mes_de(g):
         print(f"Erro mes_de: {e}")
         return raw[:7]
 
+
 def quando_de(g):
     # Data/hora do lançamento no fuso de São Paulo (ou None)
     raw = str(g.get("data") or g.get("created_at") or "")
@@ -116,12 +122,14 @@ def quando_de(g):
     except Exception:
         return None
 
+
 def data_curta(g, ano=False):
     # Só a data, ex.: 15/11 (ou 15/11/26 com ano), sem horário
     dt = quando_de(g)
     if not dt:
         return ""
     return dt.strftime("%d/%m/%y" if ano else "%d/%m")
+
 
 def parse_mes(txt):
     txt = txt.lower()
@@ -143,6 +151,7 @@ def parse_mes(txt):
         return f"{hoje_sp().year}-{int(m.group(1)):02d}"
     return None
 
+
 # ---------- SALDO E VIRADA DE MÊS ----------
 def get_saldo():
     try:
@@ -155,11 +164,13 @@ def get_saldo():
         print(f"Erro get_saldo: {e}")
         return 0.0
 
+
 def set_saldo(v):
     try:
         supabase.table("saldo_config").upsert({"id": 1, "valor": v}).execute()
     except Exception as e:
         print(f"Erro set_saldo: {e}")
+
 
 def get_ultimo_mes_visto():
     try:
@@ -172,12 +183,14 @@ def get_ultimo_mes_visto():
         print(f"Erro get_ultimo_mes_visto: {e}")
         return None
 
+
 def set_ultimo_mes_visto():
     try:
         v = int(hoje_sp().strftime("%Y%m"))
         supabase.table("saldo_config").upsert({"id": 3, "valor": v}).execute()
     except Exception as e:
         print(f"Erro set_ultimo_mes_visto: {e}")
+
 
 async def checar_virada(update):
     atual = mes_atual_str()
@@ -190,6 +203,7 @@ async def checar_virada(update):
     set_ultimo_mes_visto()
     return ultimo
 
+
 # ---------- LEITURA DE VALORES E TEXTOS ----------
 def parse_valor(s):
     # Aceita 35 | 35,5 | 1.500 | 1.500,50 | R$ 1500
@@ -200,6 +214,7 @@ def parse_valor(s):
         s = s.replace(".", "")
     return float(s)
 
+
 def pega_num(s):
     ms = list(re.finditer(NUM_RE, s))
     if not ms:
@@ -208,6 +223,7 @@ def pega_num(s):
         return parse_valor(ms[-1].group(1).rstrip(".,"))
     except ValueError:
         return None
+
 
 def pega_desc(s, rem=""):
     d = re.sub(rem, "", s, flags=re.IGNORECASE) if rem else s
@@ -218,14 +234,17 @@ def pega_desc(s, rem=""):
     d = re.sub(r"\s+", " ", d).strip(" ,-")
     return d.title() if d else "Item"
 
+
 def parse_linha(linha, rem=""):
     v = pega_num(linha)
     if v is None:
         return None
     return pega_desc(linha, rem), v
 
+
 def limpar_pagamento(txt):
     return re.sub(PAG_RE, "", txt, flags=re.IGNORECASE)
+
 
 def detectar_tipo(txt):
     t = txt.lower()
@@ -235,8 +254,10 @@ def detectar_tipo(txt):
         return "sodexo"
     return "dinheiro"
 
+
 DATA_RE = re.compile(r"(?<![\d/.,])(\d{1,2})/(\d{1,2})(?:/(\d{4}|\d{2}))?(?![\d/])")
 PAL_DATA_RE = re.compile(r"\b(anteontem|ontem|hoje)\b", re.IGNORECASE)
+
 
 def extrai_data(txt):
     # Tira a data do texto. Devolve (texto sem a data, data | None se não tem | False se inválida)
@@ -267,8 +288,10 @@ def extrai_data(txt):
         return resto, False
     return resto, d
 
+
 _COLS_DATA = None
 _DATA_E_DATE = False  # True quando a coluna "data" é do tipo date (guarda só AAAA-MM-DD)
+
 
 def colunas_data():
     # Descobre qual coluna de data a tabela gastos tem: data e/ou created_at
@@ -288,6 +311,7 @@ def colunas_data():
     except Exception as e:
         print(f"Erro ao descobrir a coluna de data: {e}")
     return ["created_at"]
+
 
 def tentar_com_data(dados, dt, executar):
     # Executa (insert/update) gravando a data na coluna certa; se a primeira tentativa falhar, tenta as outras
@@ -312,12 +336,15 @@ def tentar_com_data(dados, dt, executar):
             ultimo = e
     raise ultimo
 
+
 def iso_data(d):
     # Meio-dia em São Paulo, pra a data não escorregar de dia por causa do fuso
     dt = datetime.datetime(d.year, d.month, d.day, 12, 0, tzinfo=TZ)
     return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+
 TAG_RE = re.compile(r"(?<!\w)#(\w+)")
+
 
 def extrai_categoria(txt):
     # Tira a #categoria do texto. Devolve (texto sem a tag, nome da categoria | None se não tem | False se não existe)
@@ -334,6 +361,7 @@ def extrai_categoria(txt):
         return resto, cand[0]
     return resto, False
 
+
 def explica_falha(linha):
     _, dt = extrai_data(linha)
     if dt is False:
@@ -342,6 +370,7 @@ def explica_falha(linha):
     if cat is False:
         return "categoria desconhecida, use por exemplo #mercado ou #viagem"
     return "faltou o valor"
+
 
 def parse_linha_data(linha, rem=""):
     # Como parse_linha, mas entende a data e a #categoria. Devolve (descrição, valor, data|None, categoria|None) ou None
@@ -355,6 +384,7 @@ def parse_linha_data(linha, rem=""):
     if r is None:
         return None
     return r[0], r[1], dt, cat
+
 
 def processar_despesas(texto):
     ok = 0
@@ -372,6 +402,7 @@ def processar_despesas(texto):
         supabase.table("despesas").insert({"descricao": d, "valor": v, "status": "pendente"}).execute()
         ok += 1
     return ok
+
 
 # ---------- GASTOS POR PERÍODO (filtro no Supabase) ----------
 def gastos_entre(mes_ini, mes_fim):
@@ -396,8 +427,10 @@ def gastos_entre(mes_ini, mes_fim):
         r = supabase.table("gastos").select("*").order("id").execute().data or []
     return [x for x in r if mes_ini <= mes_de(x) <= mes_fim]
 
+
 def gastos_do_mes(fm):
     return gastos_entre(fm, fm)
+
 
 def lista_meses(fim, n):
     ano, mes = int(fim[:4]), int(fim[5:7])
@@ -410,10 +443,12 @@ def lista_meses(fim, n):
             ano -= 1
     return out[::-1]
 
+
 # ---------- CATEGORIAS: detectar, aprender, perguntar ----------
 def normalizar(s):
     s = unicodedata.normalize("NFD", str(s).lower())
     return "".join(c for c in s if unicodedata.category(c) != "Mn").strip()
+
 
 _IDX = {}
 for _nome, _lista in PALAVRAS_CATEGORIA.items():
@@ -423,6 +458,7 @@ for _nome, _lista in PALAVRAS_CATEGORIA.items():
             _IDX.setdefault(_forma, _nome)
 
 _APRENDIDAS = None
+
 
 def aprendidas():
     global _APRENDIDAS
@@ -435,6 +471,7 @@ def aprendidas():
             return {}
     return _APRENDIDAS
 
+
 def aprender(desc, nome):
     chave = normalizar(desc)
     if not chave:
@@ -444,6 +481,7 @@ def aprender(desc, nome):
         aprendidas()[chave] = nome
     except Exception as e:
         print(f"Erro ao aprender categoria: {e}")
+
 
 def detectar_categoria(desc):
     n = normalizar(desc)
@@ -458,6 +496,7 @@ def detectar_categoria(desc):
         if t in _IDX:
             return _IDX[t]
     return None
+
 
 def salvar_gasto(desc, valor, tipo, data=None, forcada=None):
     # Salva o gasto já com a categoria (a #escolhida ou a reconhecida). Devolve (id, categoria)
@@ -481,24 +520,29 @@ def salvar_gasto(desc, valor, tipo, data=None, forcada=None):
     gid = r.data[0]["id"] if r.data else None
     return gid, cat
 
+
 def linha_recibo(d, v, cat, tipo=None, data=None):
     emoji = CATEGORIAS.get(cat, "❔")
     sufixo = f" ({tipo})" if tipo else ""
     quando = f" 📅 {data.strftime('%d/%m')}" if data else ""
     return f"{emoji} {d} - R$ {v:.2f}{sufixo} → {cat or 'sem categoria'}{quando}"
 
+
 def teclado_categorias(gid):
     botoes = [InlineKeyboardButton(f"{CATEGORIAS[n]} {n}", callback_data=f"cat:{gid}:{i}") for i, n in enumerate(CAT_LISTA)]
     return InlineKeyboardMarkup([botoes[i:i + 2] for i in range(0, len(botoes), 2)])
 
+
 async def perguntar_categoria(msg, gid, desc):
     await msg.reply_text(f"Qual a categoria de {desc}?", reply_markup=teclado_categorias(gid))
+
 
 async def perguntar_sem_categoria(msg, lista, maximo=8):
     for gid, d in lista[:maximo]:
         await perguntar_categoria(msg, gid, d)
     if len(lista) > maximo:
         await msg.reply_text(f"Mais {len(lista) - maximo} sem categoria. Use: categoria ID (veja os IDs no botão Gastos).")
+
 
 def totais_por_categoria(g):
     tot = {}
@@ -509,11 +553,14 @@ def totais_por_categoria(g):
         tot[c] = tot.get(c, 0) + float(x["valor"])
     return tot
 
+
 def ordenar_categorias(tot):
     return sorted(tot.items(), key=lambda kv: kv[1], reverse=True)
 
+
 def _msg(update):
     return update.callback_query.message if update.callback_query else update.message
+
 
 async def enviar_longo(msg, texto, limite=3800, parse_mode=None):
     bloco = ""
@@ -525,11 +572,13 @@ async def enviar_longo(msg, texto, limite=3800, parse_mode=None):
     if bloco.strip():
         await msg.reply_text(bloco, parse_mode=parse_mode)
 
+
 def teclado_resumo(fm):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 Resumido", callback_data=f"resumo_simples:{fm}"), InlineKeyboardButton("🧾 Detalhado", callback_data=f"resumo_detalhado:{fm}")],
         [InlineKeyboardButton("🗂️ Categorias + gráfico", callback_data=f"resumo_categorias:{fm}"), InlineKeyboardButton("📈 Comparar meses", callback_data=f"resumo_comparar:{fm}")],
     ])
+
 
 # ---------- GRÁFICOS ----------
 def _plt():
@@ -537,6 +586,7 @@ def _plt():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     return plt
+
 
 def grafico_pizza(dados, titulo):
     # dados: lista de (categoria, valor), do maior para o menor
@@ -566,6 +616,7 @@ def grafico_pizza(dados, titulo):
         print(f"Erro grafico_pizza: {e}")
         return None
 
+
 def grafico_barras(meses, totais, titulo):
     try:
         plt = _plt()
@@ -590,6 +641,7 @@ def grafico_barras(meses, totais, titulo):
     except Exception as e:
         print(f"Erro grafico_barras: {e}")
         return None
+
 
 async def comparativo(update, context, fim_mes=None, n=6):
     msg = _msg(update)
@@ -637,12 +689,14 @@ async def comparativo(update, context, fim_mes=None, n=6):
     else:
         await msg.reply_text("Não consegui gerar o gráfico agora.")
 
+
 async def comparar_cmd(update, context):
     n = 6
     for a in context.args:
         if a.isdigit():
             n = int(a)
     await comparativo(update, context, n=n)
+
 
 # ---------- BUSCAR ----------
 def todos_gastos():
@@ -656,8 +710,10 @@ def todos_gastos():
         ini += passo
     return saida
 
+
 def _sem_trecho(txt, m):
     return (txt[:m.start()] + " " + txt[m.end():]).strip()
+
 
 def extrai_escopo(txt):
     # Separa o período do termo. Devolve (termo, 'tudo' ou 'AAAA-MM'). Sem período = mês atual
@@ -683,6 +739,7 @@ def extrai_escopo(txt):
                 ano = hoje.year - 1 if int(num) > hoje.month else hoje.year
             return _sem_trecho(txt, m), f"{ano}-{num}"
     return txt.strip(), mes_atual_str()
+
 
 async def buscar(update, context, texto):
     msg = _msg(update)
@@ -732,8 +789,10 @@ async def buscar(update, context, texto):
         t += f"\n\n... e mais {len(achados) - 50}. Seja mais específico ou escolha um mês."
     await enviar_longo(msg, t)
 
+
 async def buscar_cmd(update, context):
     await buscar(update, context, " ".join(context.args))
+
 
 # ---------- BACKUP ----------
 def gerar_csv_bytes():
@@ -752,6 +811,7 @@ def gerar_csv_bytes():
         print(f"Erro gerar_csv: {e}")
         return b""
 
+
 async def enviar_backup(update, legenda="Backup automático antes de apagar"):
     try:
         data = gerar_csv_bytes()
@@ -761,6 +821,7 @@ async def enviar_backup(update, legenda="Backup automático antes de apagar"):
             await update.callback_query.message.reply_document(document=data, filename="backup.csv", caption=legenda)
     except Exception as e:
         print(f"Erro enviar_backup: {e}")
+
 
 # ---------- TELAS ----------
 async def resumo(update, context, filtro_mes=None, detalhado=False, categorias=False):
@@ -808,6 +869,7 @@ async def resumo(update, context, filtro_mes=None, detalhado=False, categorias=F
         else:
             await msg.reply_text("Não consegui gerar o gráfico agora.")
 
+
 def menu():
     kb = [
         [InlineKeyboardButton("💰 Saldo", callback_data="saldo"), InlineKeyboardButton("💸 Dinheiro", callback_data="gasto_dinheiro")],
@@ -818,13 +880,16 @@ def menu():
     ]
     return InlineKeyboardMarkup(kb)
 
+
 def aviso_zerar(fm):
     if fm == mes_atual_str():
         return "Vai apagar os gastos desse mês, TODAS as despesas e zerar o saldo (recomeça do zero)."
     return "Vai apagar só os gastos desse mês do histórico (despesas e saldo não mudam)."
 
+
 def aviso_fechar(ant):
     return f"Fechar {ant[5:7]}/{ant[:4]} guarda os gastos no histórico e zera as despesas e o saldo."
+
 
 async def start(update, context):
     context.user_data.clear()
@@ -839,10 +904,12 @@ async def start(update, context):
         return
     await update.message.reply_text("Bot de orçamento\nBem-vindo!", reply_markup=menu())
 
+
 # ---------- OPERAÇÕES ----------
 def apagar_ids(tabela, ids):
     for i in range(0, len(ids), 100):
         supabase.table(tabela).delete().in_("id", ids[i:i + 100]).execute()
+
 
 async def apagar_gasto_por_id(gid):
     try:
@@ -860,6 +927,7 @@ async def apagar_gasto_por_id(gid):
         print(f"Erro apagar_gasto: {e}")
         return None
 
+
 async def fechar_mes():
     # Fecha o mês: os gastos ficam guardados; só despesas e saldo são zerados
     try:
@@ -868,6 +936,7 @@ async def fechar_mes():
         set_saldo(0)
     except Exception as e:
         print(f"Erro fechar_mes: {e}")
+
 
 async def zerar_mes(filtro_mes=None):
     if not filtro_mes:
@@ -882,12 +951,14 @@ async def zerar_mes(filtro_mes=None):
         print(f"Erro zerar_mes: {e}")
     return filtro_mes
 
+
 async def apagar_tudo():
     g = todos_gastos()
     apagar_ids("gastos", [x["id"] for x in g])
     d = supabase.table("despesas").select("id").execute().data or []
     apagar_ids("despesas", [x["id"] for x in d])
     set_saldo(0)
+
 
 # ---------- BOTÕES ----------
 async def on_button(update, context):
@@ -966,9 +1037,11 @@ async def on_button(update, context):
         return
     await resumo(update, context)
 
+
 # ---------- TEXTO ----------
 async def on_text(update, context):
     await tratar_texto(update, context, update.message.text.strip())
+
 
 async def tratar_texto(update, context, o):
     tx = o.lower()
@@ -1303,6 +1376,7 @@ async def tratar_texto(update, context, o):
 
     await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nzerar setembro\napagar ultimo\napagar despesa 3\napagar entrada 3000\neditar 12 45,90\ncategoria 12\ncomparar\nmercado 50 ontem\nmercado 50 15/11\nalmoço 35 #viagem\nbuscar mercado")
 
+
 # ---------- EDITAR ----------
 async def editar_item(update, context, o):
     ajuda = "Use:\neditar 12 45,90\neditar 12 45,90 Mercado\neditar 12 Mercado\neditar 12 ontem\neditar 12 15/11\neditar 12 #viagem\neditar despesa 3 187,40"
@@ -1390,10 +1464,12 @@ async def editar_item(update, context, o):
     await update.message.reply_text(msg)
     await resumo(update, context)
 
+
 async def editar_cmd(update, context):
     partes = update.message.text.split(None, 1)
     resto = partes[1] if len(partes) > 1 else ""
     await editar_item(update, context, "editar " + resto)
+
 
 # ---------- COMANDOS ----------
 async def despesa_cmd(update, context):
@@ -1409,9 +1485,11 @@ async def despesa_cmd(update, context):
         print(f"Erro despesa_cmd: {e}")
         await update.message.reply_text("Use assim, uma por linha:\n/despesa aluguel, 1500\nluz, 200\ninternet, 100")
 
+
 async def exportar_cmd(update, context):
     data = gerar_csv_bytes()
     await update.message.reply_document(document=data, filename="backup.csv", caption=f"Saldo: R$ {get_saldo():.2f}")
+
 
 async def zerar_mes_cmd(update, context):
     txt = " ".join(context.args)
@@ -1420,15 +1498,18 @@ async def zerar_mes_cmd(update, context):
     context.user_data["esperando"] = f"confirmar_zerar:{fm}"
     await update.message.reply_text(f"⚠️ Zerar o mês {fm[5:7]}/{fm[:4]}? {aviso_zerar(fm)} Manda SIM pra confirmar ou NÃO pra cancelar.")
 
+
 async def resumo_cmd(update, context):
     txt = " ".join(context.args)
     fm = parse_mes(txt) if txt else mes_atual_str()
     fm = fm or mes_atual_str()
     await update.message.reply_text(f"Resumo de {fm[5:7]}/{fm[:4]} - quer como?", reply_markup=teclado_resumo(fm))
 
+
 async def apagar_tudo_cmd(update, context):
     context.user_data["esperando"] = "confirmar_apagar_tudo"
     await update.message.reply_text("⚠️ ATENÇÃO! Isso vai apagar TODOS os gastos de TODOS os meses, todas as despesas e zerar o saldo. O histórico inteiro some.\nVou mandar um backup antes.\n\nPra confirmar, digite exatamente: APAGAR TUDO\nQualquer outra coisa cancela.")
+
 
 async def erro_geral(update, context):
     print(f"Erro: {context.error}")
@@ -1438,14 +1519,14 @@ async def erro_geral(update, context):
     except Exception:
         pass
 
-# ---------- HEALTH CHECK + MAIN ----------
-async def health(request):
-    return web.Response(text="Bot online", status=200)
 
-def main():
-    if not ALLOWED_IDS:
-        print("ATENÇÃO: ALLOWED_USER_IDS vazio ou inválido. O bot vai ignorar todo mundo!")
-    app = ApplicationBuilder().token(TOKEN).build()
+# ---------- MONTAGEM DO APP ----------
+def montar_app(com_updater=True):
+    # com_updater=False: o servidor web (Starlette) entrega os updates ao bot (modo webhook)
+    b = ApplicationBuilder().token(TOKEN)
+    if not com_updater:
+        b = b.updater(None)
+    app = b.build()
     app.add_handler(TypeHandler(Update, so_permitidos), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("despesa", despesa_cmd))
@@ -1459,31 +1540,52 @@ def main():
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(erro_geral)
+    return app
 
+
+async def rodar_webhook(app):
+    # Servidor próprio: o Telegram entrega em POST /<TOKEN>; o cron-job.org (e o Render) usam GET / ou /health e recebem 200 "ok"
+    import uvicorn
+    from starlette.applications import Starlette
+    from starlette.requests import Request
+    from starlette.responses import PlainTextResponse, Response
+    from starlette.routing import Route
+
+    async def telegram(request: Request) -> Response:
+        try:
+            dados = await request.json()
+            await app.update_queue.put(Update.de_json(data=dados, bot=app.bot))
+        except Exception as e:
+            print(f"Erro ao receber update: {e}")
+        return Response()
+
+    async def health(request: Request) -> Response:
+        return PlainTextResponse("ok")
+
+    web = Starlette(routes=[
+        Route("/" + TOKEN, telegram, methods=["POST"]),
+        Route("/", health, methods=["GET", "HEAD"]),
+        Route("/health", health, methods=["GET", "HEAD"]),
+    ])
+    servidor = uvicorn.Server(config=uvicorn.Config(app=web, host="0.0.0.0", port=PORT, use_colors=False, log_level="warning"))
+
+    async with app:
+        await app.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+        await app.start()
+        print("Bot rodando (webhook + health check)...")
+        await servidor.serve()
+        await app.stop()
+
+
+def main():
+    if not ALLOWED_IDS:
+        print("ATENÇÃO: ALLOWED_USER_IDS vazio ou inválido. O bot vai ignorar todo mundo!")
     if BASE_URL:
-        print("Bot rodando (webhook)...")
-
-        async def run():
-            # Servidor com 2 rotas: / = saúde (pro cron-job), /TOKEN = webhook do Telegram
-            web_app = web.Application()
-            web_app.router.add_get("/", health)
-            web_app.router.add_post(f"/{TOKEN}", app.webhook_handler)
-
-            runner = web.AppRunner(web_app)
-            await runner.setup()
-            site = web.TCPSite(runner, "0.0.0.0", PORT)
-            await site.start()
-
-            await app.initialize()
-            await app.bot.set_webhook(WEBHOOK_URL)
-            await app.start()
-            print("Bot rodando (webhook)...")
-            await asyncio.Event().wait()
-
-        asyncio.run(run())
+        asyncio.run(rodar_webhook(montar_app(com_updater=False)))
     else:
         print("Bot rodando (polling, sem RENDER_EXTERNAL_URL)...")
-        app.run_polling()
+        montar_app().run_polling()
+
 
 if __name__ == "__main__":
     main()
