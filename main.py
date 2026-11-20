@@ -577,6 +577,7 @@ def teclado_resumo(fm):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 Resumido", callback_data=f"resumo_simples:{fm}"), InlineKeyboardButton("🧾 Detalhado", callback_data=f"resumo_detalhado:{fm}")],
         [InlineKeyboardButton("🗂️ Categorias + gráfico", callback_data=f"resumo_categorias:{fm}"), InlineKeyboardButton("📈 Comparar meses", callback_data=f"resumo_comparar:{fm}")],
+        [InlineKeyboardButton("📅 Hoje", callback_data=f"resumo_hoje:{fm}"), InlineKeyboardButton("🗓️ Semana", callback_data=f"resumo_semana:{fm}")],
     ])
 
 
@@ -870,6 +871,49 @@ async def resumo(update, context, filtro_mes=None, detalhado=False, categorias=F
             await msg.reply_text("Não consegui gerar o gráfico agora.")
 
 
+async def resumo_periodo(update, periodo):
+    # periodo: "hoje" ou "semana" (semana = hoje e os 6 dias anteriores)
+    hoje = hoje_sp()
+    if periodo == "hoje":
+        ini = hoje
+        titulo = f"📅 *Resumo de hoje* ({hoje.strftime('%d/%m')})"
+    else:
+        ini = hoje - datetime.timedelta(days=6)
+        titulo = f"🗓️ *Resumo da semana* ({ini.strftime('%d/%m')} a {hoje.strftime('%d/%m')})"
+    g = []
+    for x in gastos_entre(ini.strftime("%Y-%m"), hoje.strftime("%Y-%m")):
+        dt = quando_de(x)
+        if dt and ini <= dt.date() <= hoje:
+            g.append(x)
+    msg = _msg(update)
+    if not g:
+        await msg.reply_text(titulo.replace("*", "") + "\n\nNenhum lançamento nesse período.")
+        return
+    din = sum(float(x["valor"]) for x in g if x["tipo"] == "dinheiro")
+    car = sum(float(x["valor"]) for x in g if x["tipo"] == "cartao")
+    sod = sum(float(x["valor"]) for x in g if x["tipo"] == "sodexo")
+    ent = sum(float(x["valor"]) for x in g if x["tipo"] == "entrada")
+    t = f"{titulo}\n\nDinheiro: R$ {din:.2f}\nCartão: R$ {car:.2f}\nSODEXO: R$ {sod:.2f}\nTotal gasto: R$ {din + car + sod:.2f}"
+    if ent:
+        t += f"\nEntradas: R$ {ent:.2f}"
+    itens = [x for x in g if x["tipo"] != "entrada"]
+    inicio = datetime.datetime(1970, 1, 1, tzinfo=TZ)
+    itens.sort(key=lambda x: (quando_de(x) or inicio, x.get("id", 0)))
+    if itens:
+        t += "\n\n🧾 *Gastos:*"
+        for x in itens:
+            emoji = CATEGORIAS.get(x.get("categoria"), "❔")
+            prefixo = f"{data_curta(x)} - " if periodo == "semana" else ""
+            t += f"\n{prefixo}{emoji} {escape_md(x['descricao'].strip().title())} - R$ {float(x['valor']):.2f}"
+    tot_cat = totais_por_categoria(g)
+    if periodo == "semana" and tot_cat:
+        total_c = sum(tot_cat.values())
+        t += "\n\n🗂️ *Por categoria:*"
+        for nome, valor in ordenar_categorias(tot_cat):
+            t += f"\n{CATEGORIAS.get(nome, '❔')} {nome} - R$ {valor:.2f} ({valor / total_c * 100:.0f}%)"
+    await enviar_longo(msg, t, parse_mode="Markdown")
+
+
 def menu():
     kb = [
         [InlineKeyboardButton("💰 Saldo", callback_data="saldo"), InlineKeyboardButton("💸 Dinheiro", callback_data="gasto_dinheiro")],
@@ -991,6 +1035,8 @@ async def on_button(update, context):
         fm = partes[1] if len(partes) > 1 else None
         if tipo == "resumo_comparar":
             await comparativo(update, context, fim_mes=fm)
+        elif tipo in ("resumo_hoje", "resumo_semana"):
+            await resumo_periodo(update, tipo.replace("resumo_", ""))
         else:
             await resumo(update, context, filtro_mes=fm, detalhado=(tipo == "resumo_detalhado"), categorias=(tipo == "resumo_categorias"))
         return
@@ -1313,6 +1359,12 @@ async def tratar_texto(update, context, o):
         return
 
     if tx.startswith("resumo"):
+        if "hoje" in tx:
+            await resumo_periodo(update, "hoje")
+            return
+        if "semana" in tx:
+            await resumo_periodo(update, "semana")
+            return
         fm = parse_mes(o) or mes_atual_str()
         kb = teclado_resumo(fm)
         await update.message.reply_text(f"Resumo de {fm[5:7]}/{fm[:4]} - quer como?", reply_markup=kb)
@@ -1386,7 +1438,7 @@ async def tratar_texto(update, context, o):
         await update.message.reply_text(f"⚠️ Não registrei: {motivo}.")
         return
 
-    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nzerar setembro\napagar ultimo\napagar despesa 3\napagar entrada 3000\neditar 12 45,90\ncategoria 12\ncomparar\nmercado 50 ontem\nmercado 50 15/11\nalmoço 35 #viagem\nbuscar mercado")
+    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nresumo hoje\nresumo semana\nzerar setembro\napagar ultimo\napagar despesa 3\napagar entrada 3000\neditar 12 45,90\ncategoria 12\ncomparar\nmercado 50 ontem\nmercado 50 15/11\nalmoço 35 #viagem\nbuscar mercado")
 
 
 # ---------- EDITAR ----------
@@ -1513,6 +1565,12 @@ async def zerar_mes_cmd(update, context):
 
 async def resumo_cmd(update, context):
     txt = " ".join(context.args)
+    if "hoje" in txt.lower():
+        await resumo_periodo(update, "hoje")
+        return
+    if "semana" in txt.lower():
+        await resumo_periodo(update, "semana")
+        return
     fm = parse_mes(txt) if txt else mes_atual_str()
     fm = fm or mes_atual_str()
     await update.message.reply_text(f"Resumo de {fm[5:7]}/{fm[:4]} - quer como?", reply_markup=teclado_resumo(fm))
