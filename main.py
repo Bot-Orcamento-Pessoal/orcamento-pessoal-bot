@@ -802,11 +802,11 @@ def gerar_csv_bytes():
         d = supabase.table("despesas").select("*").execute().data or []
         out = io.StringIO()
         w = csv.writer(out)
-        w.writerow(["tipo", "descricao", "valor", "data/status", "categoria"])
+        w.writerow(["tipo", "descricao", "valor", "data/status", "categoria", "comprovante"])
         for x in g:
-            w.writerow(["gasto", x["descricao"], x["valor"], x.get("data", "") or x.get("created_at", ""), x.get("categoria") or ""])
+            w.writerow(["gasto", x["descricao"], x["valor"], x.get("data", "") or x.get("created_at", ""), x.get("categoria") or "", ""])
         for x in d:
-            w.writerow(["despesa", x["descricao"], x["valor"], x["status"], ""])
+            w.writerow(["despesa", x["descricao"], x["valor"], x["status"], "", x.get("comprovante") or ""])
         return out.getvalue().encode("utf-8-sig")
     except Exception as e:
         print(f"Erro gerar_csv: {e}")
@@ -1052,8 +1052,8 @@ async def on_button(update, context):
         await enviar_longo(q.message, t + "\n\nPra editar, manda: editar 3 45,90\nPra mudar a categoria, manda: categoria 3\nPra apagar um, manda: apagar 3\nPra apagar despesa, manda: apagar despesa 3\nPra apagar entrada, manda: apagar entrada 3000")
     elif q.data == "listar_despesas":
         d = supabase.table("despesas").select("*").order("id").execute().data or []
-        t = "Nenhuma despesa." if not d else "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f} - {x['status']}" for x in d])
-        await q.message.reply_text(t + "\n\nPra editar, manda: editar despesa 3 187,40\nPra apagar, manda: apagar despesa 3")
+        t = "Nenhuma despesa." if not d else "\n".join([f"{x['id']}. {x['descricao']} - R$ {float(x['valor']):.2f} - {x['status']}" + (" 📎" if x.get("comprovante") else "") for x in d])
+        await q.message.reply_text(t + "\n\nPra editar, manda: editar despesa 3 187,40\nPra apagar, manda: apagar despesa 3\nPra ver o comprovante (📎), manda: comprovante 3\nPra anexar, manda o arquivo com a legenda: comprovante 3")
     elif q.data == "pagar_despesa":
         d = supabase.table("despesas").select("*").eq("status", "pendente").execute().data or []
         if not d:
@@ -1173,6 +1173,17 @@ async def tratar_texto(update, context, o):
             await update.message.reply_text("Ufa! Cancelei, não apaguei nada.", reply_markup=menu())
         return
 
+    # Pedido de comprovante depois de pagar: texto cancela (ou segue como mensagem normal)
+    if esp and esp.startswith("comprovante:"):
+        if tx in ("sim", "s"):
+            await update.message.reply_text("Manda a foto ou o PDF do comprovante agora (ou NÃO pra pular).")
+            return
+        context.user_data.clear()
+        if tx in ("nao", "não", "n", "pular", "cancelar"):
+            await update.message.reply_text("Beleza, sem comprovante. Pra anexar depois, manda o arquivo com a legenda: comprovante 3")
+            return
+        esp = None
+
     # Virada de mês (guarda o que você mandou e o fluxo em andamento)
     ant = await checar_virada(update)
     if ant:
@@ -1229,7 +1240,7 @@ async def tratar_texto(update, context, o):
         if not ids:
             await update.message.reply_text("Envie os IDs, ex: 1 2 5")
             return
-        pagas, ja_pagas, nao_achou = [], [], []
+        pagas, pagas_ids, ja_pagas, nao_achou = [], [], [], []
         total = 0
         try:
             for i in dict.fromkeys(ids):
@@ -1244,6 +1255,7 @@ async def tratar_texto(update, context, o):
                 supabase.table("despesas").update({"status": "pago"}).eq("id", i).execute()
                 total += float(d["valor"])
                 pagas.append(d["descricao"])
+                pagas_ids.append(i)
             if total:
                 set_saldo(get_saldo() - total)
         except Exception as e:
@@ -1261,6 +1273,8 @@ async def tratar_texto(update, context, o):
             msg += f"\nNão encontrei: {', '.join(map(str, nao_achou))}"
         await update.message.reply_text(msg)
         await resumo(update, context)
+        context.user_data["esperando"] = "comprovante:" + ",".join(str(i) for i in pagas_ids)
+        await update.message.reply_text(f"📎 Quer anexar o comprovante? Manda a foto ou o PDF (vale pra despesa {', '.join(map(str, pagas_ids))}). Ou manda NÃO pra pular.")
         return
 
     if tx.startswith("editar"):
@@ -1278,6 +1292,37 @@ async def tratar_texto(update, context, o):
             await update.message.reply_text("Não achei esse gasto.")
             return
         await perguntar_categoria(update.message, gid, r[0]["descricao"])
+        return
+
+    if tx.startswith("comprovante"):
+        m = re.search(r"(\d+)", o)
+        if not m:
+            await update.message.reply_text("Use: comprovante 3 (veja o ID no botão Despesas)")
+            return
+        did = int(m.group(1))
+        try:
+            r = supabase.table("despesas").select("*").eq("id", did).execute().data
+        except Exception as e:
+            print(f"Erro ao buscar comprovante: {e}")
+            await update.message.reply_text("Não consegui buscar essa despesa.")
+            return
+        if not r:
+            await update.message.reply_text("Não achei essa despesa.")
+            return
+        comp = r[0].get("comprovante")
+        if not comp:
+            await update.message.reply_text(f"A despesa {did} não tem comprovante. Pra anexar, manda o arquivo com a legenda: comprovante {did}")
+            return
+        tipo_arq, _, fid = comp.partition(":")
+        legenda = f"Comprovante: {r[0]['descricao']} - R$ {float(r[0]['valor']):.2f}"
+        try:
+            if tipo_arq == "foto":
+                await update.message.reply_photo(photo=fid, caption=legenda)
+            else:
+                await update.message.reply_document(document=fid, caption=legenda)
+        except Exception as e:
+            print(f"Erro ao reenviar comprovante: {e}")
+            await update.message.reply_text("Não consegui reenviar o arquivo (ele pode ter sido enviado por outro bot).")
         return
 
     if tx.startswith("comparar"):
@@ -1438,7 +1483,58 @@ async def tratar_texto(update, context, o):
         await update.message.reply_text(f"⚠️ Não registrei: {motivo}.")
         return
 
-    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nresumo hoje\nresumo semana\nzerar setembro\napagar ultimo\napagar despesa 3\napagar entrada 3000\neditar 12 45,90\ncategoria 12\ncomparar\nmercado 50 ontem\nmercado 50 15/11\nalmoço 35 #viagem\nbuscar mercado")
+    await update.message.reply_text("Tenta:\nentrada salario 3000\nsaida mercado 50\nresumo setembro\nresumo hoje\nresumo semana\nzerar setembro\napagar ultimo\napagar despesa 3\napagar entrada 3000\neditar 12 45,90\ncategoria 12\ncomparar\ncomprovante 3\nmercado 50 ontem\nmercado 50 15/11\nalmoço 35 #viagem\nbuscar mercado")
+
+
+# ---------- COMPROVANTES ----------
+def _id_arquivo(msg):
+    # Guarda só a referência do arquivo no Telegram: "foto:<file_id>" ou "doc:<file_id>"
+    if msg.photo:
+        return "foto:" + msg.photo[-1].file_id
+    if msg.document:
+        return "doc:" + msg.document.file_id
+    return None
+
+
+async def on_arquivo(update, context):
+    msg = update.message
+    arq = _id_arquivo(msg)
+    if not arq:
+        return
+    esp = context.user_data.get("esperando")
+    esperando_comp = bool(esp and esp.startswith("comprovante:"))
+    ids = []
+    if esperando_comp:
+        ids = [int(x) for x in esp.split(":", 1)[1].split(",") if x.isdigit()]
+    else:
+        m = re.search(r"comprovante\D*(\d+)", msg.caption or "", flags=re.IGNORECASE)
+        if m:
+            ids = [int(m.group(1))]
+    if not ids:
+        await msg.reply_text("Pra anexar um comprovante, manda o arquivo com a legenda: comprovante 3 (veja o ID no botão Despesas).")
+        return
+    salvos, nao_achou = [], []
+    try:
+        for i in ids:
+            r = supabase.table("despesas").select("id,descricao").eq("id", i).execute().data
+            if not r:
+                nao_achou.append(i)
+                continue
+            supabase.table("despesas").update({"comprovante": arq}).eq("id", i).execute()
+            salvos.append(f"{i} ({r[0]['descricao']})")
+    except Exception as e:
+        print(f"Erro ao salvar comprovante: {e}")
+        await msg.reply_text("Não consegui salvar o comprovante. Confira se a coluna 'comprovante' (tipo texto) foi criada na tabela despesas do Supabase.")
+        return
+    if esperando_comp:
+        context.user_data.clear()
+    if not salvos:
+        await msg.reply_text("Não achei essa despesa.")
+        return
+    texto = "📎 Comprovante anexado à despesa " + ", ".join(salvos) + "."
+    if nao_achou:
+        texto += f"\nNão encontrei: {', '.join(map(str, nao_achou))}"
+    await msg.reply_text(texto)
 
 
 # ---------- EDITAR ----------
@@ -1608,6 +1704,7 @@ def montar_app(com_updater=True):
     app.add_handler(CommandHandler("editar", editar_cmd))
     app.add_handler(CommandHandler("apagar_tudo", apagar_tudo_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, on_arquivo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(erro_geral)
     return app
