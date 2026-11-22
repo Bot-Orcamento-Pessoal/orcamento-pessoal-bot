@@ -1,6 +1,6 @@
 # projeto.md - CONTEXTO COMPLETO DO PROJETO: Bot de Orçamento Pessoal (Telegram)
 
-Atualizado em 20/11/2026.
+Atualizado em 21/11/2026.
 
 Como usar: cole este arquivo inteiro numa IA nova e, em seguida, cole o main.py. Tudo aqui descreve o main.py atual (arquivo único). O bot e todas as mensagens são em português do Brasil. Itens marcados "(informado pelo dono, fora do main.py)" não estão no código.
 
@@ -64,8 +64,9 @@ Colunas: `id`, `descricao`, `valor`, `tipo`, `created_at`, `data`, `categoria`.
   - Filtro por período (`gastos_entre`): usa `.gte(colunas_data()[0], ...)` e `.lt(colunas_data()[0], ...)` com 1 dia de folga em cada ponta, e depois confere o mês exato no Python com `mes_de`. Se a consulta falhar, o plano B busca a tabela inteira em UMA consulta (sem paginar, limite de 1000 linhas do Supabase). Limitação conhecida.
 
 ### despesas
-Colunas: `id`, `descricao`, `valor`, `status`.
+Colunas: `id`, `descricao`, `valor`, `status`, `comprovante`.
 - `status`: `pendente` ou `pago`.
+- `comprovante`: texto ou NULL (coluna que o dono precisa criar no Supabase). Guarda só a REFERÊNCIA do arquivo no Telegram, não o arquivo: `foto:<file_id>` (foto) ou `doc:<file_id>` (PDF ou outro documento). O arquivo fica guardado no Telegram. Se o token/bot mudar, os arquivos antigos podem não abrir. Sem a coluna, `on_arquivo` avisa que não conseguiu salvar; a listagem e o CSV continuam funcionando (usam `.get`).
 - Sem coluna de data e sem categoria. Despesas são contas do mês (aluguel, luz, cartão...) lançadas manualmente.
 
 ### saldo_config
@@ -85,8 +86,9 @@ Colunas: `palavra` (chave, texto), `categoria` (texto).
 1. `TypeHandler(Update, so_permitidos)` com `group=-1` (roda antes de todos; bloqueia IDs não permitidos, inclusive cliques em botões, lançando ApplicationHandlerStop).
 2. Comandos: `/start`, `/despesa`, `/exportar`, `/zerar_mes`, `/resumo`, `/comparar`, `/buscar`, `/editar`, `/apagar_tudo`.
 3. `CallbackQueryHandler(on_button)`.
-4. `MessageHandler(filters.TEXT & ~filters.COMMAND, on_text)`.
-5. `add_error_handler(erro_geral)`: imprime "Erro: ..." no log e responde "⚠️ Deu um erro aqui. Tenta de novo.".
+4. `MessageHandler(filters.PHOTO | filters.Document.ALL, on_arquivo)` (comprovantes).
+5. `MessageHandler(filters.TEXT & ~filters.COMMAND, on_text)`.
+6. `add_error_handler(erro_geral)`: imprime "Erro: ..." no log e responde "⚠️ Deu um erro aqui. Tenta de novo.".
 - NÃO existem os comandos /saldo, /add, /relatorio (existiram em versões antigas). O saldo é lançado pelo botão "💰 Saldo".
 
 `rodar_webhook(app)` (modo webhook): monta um app Starlette com as rotas da seção 3, cria `uvicorn.Server` (host 0.0.0.0, porta PORT, `log_level="warning"`) e roda `async with app:` -> `set_webhook` -> `app.start()` -> `servidor.serve()` -> `app.stop()`. O POST do Telegram vira `Update.de_json(...)` e é colocado em `app.update_queue`.
@@ -106,7 +108,7 @@ Comportamento de `on_button(update, context)` (sempre faz `q.answer()` primeiro)
 - `saldo`: `esperando = "saldo"`, pede "Envie o saldo. Ex: 3500".
 - `gasto_dinheiro` / `gasto_cartao` / `gasto_sodexo`: `esperando = <o próprio callback>`, pede uma linha por item (explica vírgula opcional, data "ontem"/"15/11" e `#categoria`).
 - `listar_gastos`: gastos do mês atual (`gastos_do_mes`), uma linha por item: `ID. descricao - R$ valor - tipo - categoria` (a categoria só se existir; NÃO mostra data), mais dicas de editar/categoria/apagar. Usa `enviar_longo`.
-- `listar_despesas`: todas as despesas (`ID. descricao - R$ valor - status`) mais dicas.
+- `listar_despesas`: todas as despesas (`ID. descricao - R$ valor - status`, com 📎 no fim se tem comprovante) mais dicas (editar, apagar, `comprovante 3`, anexar).
 - `pagar_despesa`: lista as pendentes e define `esperando = "pagar"`. Se não há pendentes, responde "Nenhuma pendente.".
 - `apagar_ultimo`: apaga o gasto de maior `id` (de qualquer mês, inclusive entrada) via `apagar_gasto_por_id` (que ajusta o saldo).
 - `zerar_mes`: `esperando = "confirmar_zerar:AAAA-MM"` (mês atual) e pede SIM/NÃO. Retorna.
@@ -118,12 +120,14 @@ Comportamento de `on_button(update, context)` (sempre faz `q.answer()` primeiro)
 ORDEM EXATA das verificações (a ordem importa; um comando novo precisa entrar antes do que poderia capturá-lo e antes do "texto solto"):
 1. `esp` começa com `confirmar_zerar` ou `confirmar_fechar`: resposta "sim" ou "s" confirma; "nao"/"não"/"n"/"cancelar" cancela; qualquer outro texto também cancela e depois é reprocessado como mensagem normal. Detalhes em 5.6.
 2. `esp` começa com `confirmar_apagar_tudo`: só confirma se o texto, em maiúsculas, for exatamente `APAGAR TUDO`.
+2b. `esp` começa com `comprovante:` (checado ANTES da virada de mês): "sim"/"s" pede para mandar o arquivo e mantém o estado; "não"/"n"/"pular"/"cancelar" limpa o estado e responde "Beleza, sem comprovante..."; qualquer outro texto limpa o estado e a mensagem segue como mensagem normal.
 3. Virada de mês: `checar_virada` detecta mês novo (ver 5.6).
 4. `esp == "saldo"`: lê um número com `pega_num` e SOMA ao saldo atual (não substitui). Responde "Saldo: R$ v" e envia o resumo. Se não achar número: "Envie só o número, ex: 3500".
 5. `esp` começa com `gasto_`: fluxo dos botões Dinheiro/Cartão/SODEXO. O tipo vem do botão (`dinheiro`, `cartao`, `sodexo`). Os itens são separados por `linhas_de(o)` (quebra de linha ou `;`). Cada item usa `parse_linha_data(linha)` (sem `limpar_pagamento`). Salva com `salvar_gasto(d, v, tipo, dt, fc)`. Se `tipo == "dinheiro"`, desconta do saldo. Linhas inválidas entram em "⚠️ Não registrei:" com o motivo (`explica_falha`). Responde "Registrado: N item(ns) - R$ total" mais as linhas de recibo, depois envia o resumo e depois `perguntar_sem_categoria`. Limpa `user_data`.
-6. `esp == "pagar"`: extrai todos os números do texto (`\d+`), sem repetir e mantendo a ordem. Para cada ID: se não existe vai para "Não encontrei"; se já está `pago` vai para "Já estavam pagas"; senão marca `status = "pago"`. Ao final desconta do saldo a soma das pagas. Responde "✅ Pagas: ... Total: R$ ..." e envia o resumo. Se nenhuma foi paga, avisa e mantém o estado `pagar` para tentar de novo.
+6. `esp == "pagar"`: extrai todos os números do texto (`\d+`), sem repetir e mantendo a ordem. Para cada ID: se não existe vai para "Não encontrei"; se já está `pago` vai para "Já estavam pagas"; senão marca `status = "pago"`. Ao final desconta do saldo a soma das pagas. Responde "✅ Pagas: ... Total: R$ ...", envia o resumo e então pergunta "📎 Quer anexar o comprovante?" (define `esperando = "comprovante:ID1,ID2"` com os IDs pagos agora; um mesmo arquivo vale para todos). Se nenhuma foi paga, avisa e mantém o estado `pagar` para tentar de novo.
 7. `tx` começa com `editar`: `editar_item` (5.9).
 8. `tx` começa com `categoria`: `categoria ID` mostra os botões de categoria para o gasto ID. Sem número: "Use: categoria 12 (veja o ID no botão Gastos)". ID inexistente: "Não achei esse gasto.".
+8b. `tx` começa com `comprovante`: `comprovante 3` reenvia o arquivo guardado na despesa 3 (`reply_photo` se `foto:`, senão `reply_document`), com a legenda "Comprovante: descrição - R$ valor". Sem número: "Use: comprovante 3 ...". Despesa inexistente: "Não achei essa despesa.". Sem comprovante: avisa como anexar. Falha ao reenviar: "Não consegui reenviar o arquivo...".
 9. `tx` começa com `comparar`: `comparar` ou `comparar 3` (número = quantidade de meses, padrão 6) -> `comparativo`.
 10. `tx` começa com `buscar`: `buscar(update, context, resto)` (5.8).
 11. `tx` começa com `apagar tudo` ou é `apagar_tudo`: define `esperando = "confirmar_apagar_tudo"` e pede para digitar exatamente `APAGAR TUDO`.
@@ -156,6 +160,8 @@ Despesa (`despesa aluguel, 1500` ou `/despesa aluguel, 1500` e linhas seguintes 
 
 ### 5.5 Pagar despesas
 Botão "✅ Pagar" -> manda IDs (um ou vários: `1 2 5`). Cada despesa pendente vira `pago` e o total é descontado do saldo (uma vez, no fim). Despesa já paga não é cobrada de novo.
+
+Comprovante (`on_arquivo`, só despesas): o bot guarda só a referência do arquivo (`_id_arquivo`: `foto:<file_id>` com a maior resolução, ou `doc:<file_id>`) na coluna `despesas.comprovante`. Duas formas de anexar: (1) logo depois de pagar, quando o bot pergunta (estado `comprovante:IDs`): manda a foto/PDF e ele anexa a todas as despesas pagas naquele momento; (2) a qualquer hora, mandando o arquivo com a legenda `comprovante 3` (regex `comprovante\D*(\d+)` na legenda). Arquivo sem estado e sem legenda: o bot explica como anexar. Anexar de novo substitui o anterior. Fotos mandadas em álbum chegam como mensagens separadas: só a primeira usa o estado de "depois de pagar". Ver: `comprovante 3`. Gastos (tabela `gastos`) NÃO têm comprovante.
 
 ### 5.6 Virada de mês, fechar mês, zerar mês, apagar tudo
 - `checar_virada(update)`: compara `saldo_config id=3` com o mês atual. Se não existe registro: grava o mês atual e devolve False. Se é igual: False. Se diferente: grava o mês atual e devolve o mês anterior registrado (ex.: "2026-10"). É chamada em `/start` e em toda mensagem de texto (cliques em botões NÃO chamam).
@@ -198,14 +204,14 @@ Botão "✅ Pagar" -> manda IDs (um ou vários: `1 2 5`). Cada despesa pendente 
 - Resposta: "✏️ Gasto|Despesa ID atualizado: descrição - R$ valor 📅 DD/MM categoria" e depois o resumo.
 
 ### 5.10 Exportar / backup
-`/exportar` -> `gerar_csv_bytes()` e `reply_document` com `backup.csv` (codificação utf-8-sig) e legenda "Saldo: R$ x". Colunas: `tipo`, `descricao`, `valor`, `data/status`, `categoria`. Linhas `gasto` (data crua de `data` ou `created_at`, categoria) e linhas `despesa` (status, categoria vazia). Usa `todos_gastos()`.
+`/exportar` -> `gerar_csv_bytes()` e `reply_document` com `backup.csv` (codificação utf-8-sig) e legenda "Saldo: R$ x". Colunas: `tipo`, `descricao`, `valor`, `data/status`, `categoria`, `comprovante`. Linhas `gasto` (data crua de `data` ou `created_at`, categoria, comprovante vazio) e linhas `despesa` (status, categoria vazia, comprovante = referência `foto:`/`doc:` + file_id, ou vazio). Usa `todos_gastos()`.
 
 ### 5.11 Segurança
 `so_permitidos` (TypeHandler, group -1): se `update.effective_user.id` não está em `ALLOWED_IDS`, lança `ApplicationHandlerStop` (o bot não responde nada). A rota de health check (`/` e `/health`) é pública e só devolve "ok" (não expõe dados).
 
 ### 5.12 Estados em context.user_data
 Chaves: `esperando`, `pendente`, `esperando_depois`.
-- `esperando` pode ser: `saldo`, `gasto_dinheiro`, `gasto_cartao`, `gasto_sodexo`, `pagar`, `confirmar_zerar:AAAA-MM`, `confirmar_fechar:AAAA-MM`, `confirmar_apagar_tudo`.
+- `esperando` pode ser: `comprovante:ID1,ID2` (depois de pagar), `saldo`, `gasto_dinheiro`, `gasto_cartao`, `gasto_sodexo`, `pagar`, `confirmar_zerar:AAAA-MM`, `confirmar_fechar:AAAA-MM`, `confirmar_apagar_tudo`.
 - `pendente` e `esperando_depois` só existem durante a confirmação da virada do mês.
 - Os fluxos terminam com `context.user_data.clear()`.
 - Se o bot parece "travado" tratando mensagens como outra coisa, `/start` limpa o estado.
@@ -269,6 +275,8 @@ Chaves: `esperando`, `pendente`, `esperando_depois`.
 - `linhas_de(texto)`: separa lançamentos por quebra de linha ou `;`.
 - `lancar_saidas(update, linhas)`: lança várias saídas e responde (recibo, falhas, resumo, perguntas de categoria).
 - `on_text`, `tratar_texto`: tratadores de texto.
+- `_id_arquivo(msg)`: referência `foto:<file_id>` / `doc:<file_id>` de uma mensagem com foto ou documento.
+- `on_arquivo`: recebe foto/PDF e anexa como comprovante de despesa.
 - `editar_item`, `editar_cmd`: editar gasto/despesa.
 - `despesa_cmd`: comando `/despesa`.
 - `exportar_cmd`: comando `/exportar`.
@@ -293,6 +301,7 @@ Chaves: `esperando`, `pendente`, `esperando_depois`.
 - Se o health check parar de responder 200, o cron-job.org marca falha e desativa o job depois de 25 falhas seguidas.
 - `callback_data` do Telegram aceita no máximo 64 bytes. O callback `cat:{gid}:{idx}` usa o índice da posição em `CAT_LISTA`: mudar a ordem das categorias muda o significado (manter "Outros" por último).
 - `resumo`, `resumo_periodo` e `comparativo` enviam com `parse_mode="Markdown"` (Markdown simples): textos do usuário passam por `escape_md`. Mensagens sem `parse_mode` não devem usar `escape_md` (a barra apareceria).
+- Mensagens de foto/PDF NÃO passam por `tratar_texto`; têm handler próprio (`on_arquivo`). O handler de arquivos fica registrado antes do de texto em `montar_app`.
 - Mensagens longas: use `enviar_longo`.
 - Para ler a tabela `gastos` inteira, use `todos_gastos()` (paginado).
 - Erros de banco quase sempre são capturados com try/except e `print`. `erro_geral` cobre o resto com uma mensagem genérica.
@@ -379,6 +388,7 @@ O saldo é um único número (saldo_config id 1), só do dinheiro em mãos:
 - Se a mudança exigir biblioteca nova, avisar para acrescentar no requirements.txt.
 - Não inventar tabelas, colunas ou funções que não estão neste documento sem avisar antes.
 - Decisões do dono que não devem ser desfeitas sem eu pedir (informado pelo dono, fora do main.py): despesas lançadas manualmente todo mês (sem despesas recorrentes automáticas); limite mensal com alerta e campo "quem lançou" ficaram de fora por enquanto; `/apagar_tudo` só com a frase `APAGAR TUDO`; histórico dos gastos é mantido na virada do mês (fechar mês não apaga gastos); resumo detalhado mostra só DD/MM (sem horário) e a lista do botão "📋 Gastos" não mostra data; "semana" no `resumo semana` = últimos 7 dias (não segunda a domingo); pensa em um app Android no futuro, usando o mesmo Supabase.
+- Comprovante de despesa: método escolhido pelo dono = guardar só o `file_id` do Telegram (coluna `despesas.comprovante`). Guardar o arquivo no Supabase Storage ficou de fora.
 - Ideias sugeridas e AINDA NÃO implementadas (só fazer se eu pedir): backup automático agendado enviado no Telegram; pagamento misto numa linha só (`mercado dinheiro 30 cartão 20`); botão "Desfazer" depois de cada lançamento; alertas de saldo baixo ou limite por categoria; guardar o estado das conversas (`user_data`) no Supabase para sobreviver a reinício do Render.
 
 O main.py completo está no GitHub.
